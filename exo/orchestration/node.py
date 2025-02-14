@@ -10,19 +10,13 @@ from exo.inference.inference_engine import InferenceEngine, Shard
 from exo.topology.topology import Topology
 from exo.topology.device_capabilities import device_capabilities, UNKNOWN_DEVICE_CAPABILITIES
 from exo.topology.partitioning_strategy import Partition, PartitioningStrategy, map_partitions_to_shards
+from exo.inference.generation_options import GenerationOptions
 from exo import DEBUG
 from exo.helpers import AsyncCallbackSystem
 from exo.viz.topology_viz import TopologyViz
 from exo.download.download_progress import RepoProgressEvent
 from exo.inference.inference_engine import get_inference_engine, InferenceEngine
 from exo.download.shard_download import ShardDownloader
-
-
-class GenerationOptions:
-  max_completion_tokens: Optional[int] = None
-
-  def __init__(self, max_completion_tokens: Optional[int] = None):
-    self.max_completion_tokens = max_completion_tokens
 
 
 class Node:

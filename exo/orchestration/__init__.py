@@ -1,3 +1,3 @@
-from .node import Node, GenerationOptions
+from .node import Node
 
-__all__ = ["Node", "GenerationOptions"]
+__all__ = ["Node"]

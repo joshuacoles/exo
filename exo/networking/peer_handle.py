@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Tuple, List
 import numpy as np
 from exo.inference.shard import Shard
-from exo.orchestration.node import GenerationOptions
+from exo.inference.generation_options import GenerationOptions
 from exo.topology.device_capabilities import DeviceCapabilities
 from exo.topology.topology import Topology
 
