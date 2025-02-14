@@ -148,11 +148,13 @@ class Node:
       await self.inference_engine.ensure_shard(shard)
       token = await self.inference_engine.sample(result, temp=self.default_sample_temperature)
 
-      self.buffered_token_output[request_id][0].append(token.item())
-      is_finished = (
-        token.item() == self.inference_engine.tokenizer.eos_token_id
-        or len(self.buffered_token_output[request_id][0]) >= self.max_generate_tokens
-      )
+      is_eos_token = token.item() == self.inference_engine.tokenizer.eos_token_id
+
+      if is_eos_token:
+        is_finished = True
+      else:
+        self.buffered_token_output[request_id][0].append(token.item())
+        is_finished = len(self.buffered_token_output[request_id][0]) + 1 >= self.max_generate_tokens
 
       intermediate_result = [token.item()]
       self.trigger_on_token_callbacks(request_id, intermediate_result, is_finished)
