@@ -17,6 +17,7 @@ from exo.download.download_progress import RepoProgressEvent
 from exo.inference.inference_engine import get_inference_engine, InferenceEngine
 from exo.download.shard_download import ShardDownloader
 
+
 class Node:
   def __init__(
     self,
@@ -44,7 +45,7 @@ class Node:
     self.buffered_inputs: Dict[str, List[np.ndarray]] = {}
     self.buffered_partials: Dict[str, List[np.ndarray]] = {}
     self.checkpoints: Dict[str, Dict[str, int]] = {}
-    
+
     self.max_generate_tokens = max_generate_tokens
     self.topology_viz = topology_viz
     self.default_sample_temperature = default_sample_temperature
@@ -90,7 +91,8 @@ class Node:
         self.node_download_progress[status_data.get('node_id')] = download_progress
 
       if self.topology_viz:
-        self.topology_viz.update_visualization(self.topology, self.partitioning_strategy.partition(self.topology), self.id, self.node_download_progress)
+        self.topology_viz.update_visualization(self.topology, self.partitioning_strategy.partition(self.topology),
+                                               self.id, self.node_download_progress)
     except Exception as e:
       if DEBUG >= 1: print(f"Error on_node_status: {e}")
       if DEBUG >= 1: traceback.print_exc()
@@ -105,7 +107,8 @@ class Node:
     return supported_engine_names
 
   async def broadcast_supported_engines(self, supported_engines_names: List[str]):
-    status_message = json.dumps({"type": "supported_inference_engines", "node_id": self.id, "engines": supported_engines_names})
+    status_message = json.dumps(
+      {"type": "supported_inference_engines", "node_id": self.id, "engines": supported_engines_names})
     await self.broadcast_opaque_status("", status_message)
 
   def get_topology_inference_engines(self) -> List[List[str]]:
@@ -224,7 +227,8 @@ class Node:
     )
     if DEBUG >= 2: print(f"[{request_id}] process prompt: {base_shard=} {shard=} {prompt=} {elapsed_time_ns=}")
 
-  async def _process_prompt(self, base_shard: Shard, prompt: str, request_id: Optional[str] = None, inference_state: Optional[dict] = None) -> Optional[np.ndarray]:
+  async def _process_prompt(self, base_shard: Shard, prompt: str, request_id: Optional[str] = None,
+                            inference_state: Optional[dict] = None) -> Optional[np.ndarray]:
     if request_id is None:
       request_id = str(uuid.uuid4())
     shard = self.get_current_shard(base_shard)
@@ -245,7 +249,7 @@ class Node:
     self,
     base_shard: Shard,
     example: np.ndarray,
-    target: np.ndarray, 
+    target: np.ndarray,
     length: np.ndarray,
     request_id: Optional[str] = None,
     train: bool = False,
@@ -258,7 +262,7 @@ class Node:
       if request_id is None:
         request_id = str(uuid.uuid4())
       self.outstanding_requests[request_id] = "waiting"
-      loss = await self.forward_example(shard, example, target, length, train, request_id, 0) 
+      loss = await self.forward_example(shard, example, target, length, train, request_id, 0)
     return loss
 
   async def coordinate_save(
@@ -289,7 +293,7 @@ class Node:
     self,
     base_shard: Shard,
     example: np.ndarray,
-    target: np.ndarray, 
+    target: np.ndarray,
     length: np.ndarray,
     train: bool = False,
     request_id: Optional[str] = None,
@@ -334,7 +338,7 @@ class Node:
     self,
     base_shard: Shard,
     example: np.ndarray,
-    target: np.ndarray, 
+    target: np.ndarray,
     length: np.ndarray,
     train: bool = False,
     request_id: Optional[str] = None,
@@ -353,9 +357,11 @@ class Node:
           self.outstanding_requests[request_id] = "preprocessing"
           step, _ = await self.inference_engine.infer_tensor(request_id, shard, example)
           self.outstanding_requests[request_id] = "waiting"
-          loss, backgrad = await self.forward_example(shard, step, target, length, train, request_id, self.get_partition_index(offset = 1))
+          loss, backgrad = await self.forward_example(shard, step, target, length, train, request_id,
+                                                      self.get_partition_index(offset=1))
           self.outstanding_requests[request_id] = "training"
-          partial_loss, grad = await self.inference_engine.train(request_id, shard, example, backgrad, length, loss="back_gradient")
+          partial_loss, grad = await self.inference_engine.train(request_id, shard, example, backgrad, length,
+                                                                 loss="back_gradient")
         self.outstanding_requests.pop(request_id)
         if shard.is_first_layer():
           return loss
@@ -369,7 +375,8 @@ class Node:
           self.outstanding_requests[request_id] = "preprocessing"
           step, _ = await self.inference_engine.infer_tensor(request_id, shard, example)
           self.outstanding_requests[request_id] = "waiting"
-          loss = await self.forward_example(shard, step, target, length, train, request_id, self.get_partition_index(offset = 1))
+          loss = await self.forward_example(shard, step, target, length, train, request_id,
+                                            self.get_partition_index(offset=1))
         self.outstanding_requests.pop(request_id)
         return loss
     except Exception as e:
@@ -377,7 +384,7 @@ class Node:
       print(f"Error processing example for shard {shard}: {e}")
       traceback.print_exc()
       return None
-        
+
   async def process_tensor(
     self,
     base_shard: Shard,
@@ -390,7 +397,8 @@ class Node:
     resp = await self._process_tensor(shard, tensor, request_id, inference_state)
     end_time = time.perf_counter_ns()
     elapsed_time_ns = end_time - start_time
-    if DEBUG >= 2: print(f"[{request_id}] process_tensor: {base_shard=} {shard=} {tensor.size=} {tensor.shape=} {elapsed_time_ns=}")
+    if DEBUG >= 2: print(
+      f"[{request_id}] process_tensor: {base_shard=} {shard=} {tensor.size=} {tensor.shape=} {elapsed_time_ns=}")
 
   async def _process_tensor(
     self,
@@ -406,13 +414,13 @@ class Node:
     try:
       self.outstanding_requests[request_id] = "processing"
       result, inference_state = await self.inference_engine.infer_tensor(request_id, shard, tensor, inference_state)
-      ret = await self.process_inference_result(shard, result, request_id, inference_state) 
+      ret = await self.process_inference_result(shard, result, request_id, inference_state)
       return ret
     except Exception as e:
       self.outstanding_requests.pop(request_id)
       print(f"Error processing tensor for shard {shard}: {e}")
       traceback.print_exc()
-  
+
   async def forward_example(
     self,
     base_shard: Shard,
@@ -426,7 +434,8 @@ class Node:
     if DEBUG >= 1: print(f"target partition index: {target_index}")
     target_id = self.partitioning_strategy.partition(self.topology)[target_index].node_id
     target_shard = self.get_current_shard(base_shard, target_index)
-    if DEBUG >= 2: print(f"computed target from: {base_shard} {target_index}, {self.topology}. target shard: {target_shard}")
+    if DEBUG >= 2: print(
+      f"computed target from: {base_shard} {target_index}, {self.topology}. target shard: {target_shard}")
     target_peer = next((p for p in self.peers if p.id() == target_id), None)
     if not target_peer:
       raise ValueError(f"peer for {target_index} not found")
@@ -445,7 +454,8 @@ class Node:
     if DEBUG >= 1: print(f"target partition index: {target_index}")
     target_id = self.partitioning_strategy.partition(self.topology)[target_index].node_id
     next_shard = self.get_current_shard(base_shard, target_index)
-    if DEBUG >= 2: print(f"Computed target from: {base_shard} {target_index}, {self.topology}. next shard: {next_shard}")
+    if DEBUG >= 2: print(
+      f"Computed target from: {base_shard} {target_index}, {self.topology}. next shard: {next_shard}")
     if target_id == self.id:
       await self.process_prompt(next_shard, prompt, request_id, inference_state)
     else:
@@ -454,7 +464,7 @@ class Node:
         raise ValueError(f"Peer for {target_index} not found")
       if DEBUG >= 1: print(f"Sending prompt to {target_peer.id()}: {prompt}")
       await target_peer.send_prompt(next_shard, prompt, request_id=request_id, inference_state=inference_state)
-  
+
   async def forward_tensor(
     self,
     base_shard: Shard,
@@ -466,7 +476,8 @@ class Node:
     if DEBUG >= 1: print(f"target partition index: {target_index}")
     target_id = self.partitioning_strategy.partition(self.topology)[target_index].node_id
     next_shard = self.get_current_shard(base_shard, target_index)
-    if DEBUG >= 2: print(f"Computed target from: {base_shard} {target_index}, {self.topology}. target shard: {next_shard}")
+    if DEBUG >= 2: print(
+      f"Computed target from: {base_shard} {target_index}, {self.topology}. target shard: {next_shard}")
     if target_id == self.id:
       await self.process_tensor(next_shard, tensor, request_id, inference_state)
     else:
@@ -499,8 +510,10 @@ class Node:
     next_peer_ids = {peer.id() for peer in next_peers}
     peers_added = [peer for peer in next_peers if peer.id() not in current_peer_ids]
     peers_removed = [peer for peer in self.peers if peer.id() not in next_peer_ids]
-    peers_updated = [peer for peer in next_peers if peer.id() in current_peer_ids and any(p.addr() != peer.addr() for p in self.peers if p.id() == peer.id())]
-    peers_unchanged = [peer for peer in next_peers if peer.id() in current_peer_ids and all(p.addr() == peer.addr() for p in self.peers if p.id() == peer.id())]
+    peers_updated = [peer for peer in next_peers if peer.id() in current_peer_ids and any(
+      p.addr() != peer.addr() for p in self.peers if p.id() == peer.id())]
+    peers_unchanged = [peer for peer in next_peers if peer.id() in current_peer_ids and all(
+      p.addr() == peer.addr() for p in self.peers if p.id() == peer.id())]
     peers_to_disconnect = [peer for peer in peers_removed if await peer.is_connected()]
     peers_to_connect = [peer for peer in peers_added + peers_updated + peers_unchanged if not await peer.is_connected()]
 
@@ -508,7 +521,8 @@ class Node:
       return [f"{peer.id()}@{peer.addr()}" for peer in peers]
 
     if DEBUG >= 2:
-      print(f"update_peers: added={peers_added} removed={peers_removed} updated={peers_updated} unchanged={peers_unchanged} to_disconnect={peers_to_disconnect} to_connect={peers_to_connect}")
+      print(
+        f"update_peers: added={peers_added} removed={peers_removed} updated={peers_updated} unchanged={peers_unchanged} to_disconnect={peers_to_disconnect} to_connect={peers_to_connect}")
 
     async def disconnect_with_timeout(peer, timeout=5):
       try:
@@ -528,8 +542,10 @@ class Node:
         traceback.print_exc()
         return False
 
-    disconnect_results = await asyncio.gather(*(disconnect_with_timeout(peer) for peer in peers_to_disconnect), return_exceptions=True)
-    connect_results = await asyncio.gather(*(connect_with_timeout(peer) for peer in peers_to_connect), return_exceptions=True)
+    disconnect_results = await asyncio.gather(*(disconnect_with_timeout(peer) for peer in peers_to_disconnect),
+                                              return_exceptions=True)
+    connect_results = await asyncio.gather(*(connect_with_timeout(peer) for peer in peers_to_connect),
+                                           return_exceptions=True)
 
     successful_disconnects = [peer for peer, result in zip(peers_to_disconnect, disconnect_results) if result is True]
     failed_disconnects = [peer for peer, result in zip(peers_to_disconnect, disconnect_results) if result is False]
@@ -596,7 +612,8 @@ class Node:
     next_topology.active_node_id = self.topology.active_node_id
     self.topology = next_topology
     if self.topology_viz:
-      self.topology_viz.update_visualization(self.topology, self.partitioning_strategy.partition(self.topology), self.id)
+      self.topology_viz.update_visualization(self.topology, self.partitioning_strategy.partition(self.topology),
+                                             self.id)
     return self.topology
 
   @property
@@ -610,9 +627,10 @@ class Node:
   def trigger_on_token_callbacks(self, request_id: str, tokens: List[int], is_finished: bool) -> None:
     if DEBUG >= 2: print(f"Triggering all on_token callbacks with {request_id=} {tokens=} {is_finished=}")
     self.on_token.trigger_all(request_id, tokens, is_finished)
-  
+
   async def broadcast_result(self, request_id: str, result: List[int], is_finished: bool) -> None:
     if DEBUG >= 2: print(f"Broadcasting result: {request_id=} {result=} {is_finished=}")
+
     async def send_result_to_peer(peer):
       try:
         await asyncio.wait_for(peer.send_result(request_id, result, is_finished), timeout=15.0)
@@ -646,8 +664,8 @@ class Node:
 
   def handle_stable_diffusion(self, inference_state, result):
     if inference_state['is_step_finished']:
-      inference_state['step']+=1
-    progress = [inference_state['step'],inference_state['total_steps']]
+      inference_state['step'] += 1
+    progress = [inference_state['step'], inference_state['total_steps']]
     intermediate_result = result
     if progress[0] == progress[1]:
       intermediate_result = result
