@@ -21,10 +21,10 @@ DEBUG_DISCOVERY = int(os.getenv("DEBUG_DISCOVERY", default="0"))
 VERSION = "0.0.1"
 
 exo_text = r"""
-  _____  _____  
- / _ \ \/ / _ \ 
+  _____  _____
+ / _ \ \/ / _ \
 |  __/>  < (_) |
- \___/_/\_\___/ 
+ \___/_/\_\___/
     """
 
 # Single shared thread pool for subprocess operations
@@ -338,19 +338,19 @@ async def get_mac_system_info() -> Tuple[str, str, int]:
             subprocess_pool,
             lambda: subprocess.check_output(["system_profiler", "SPHardwareDataType"]).decode("utf-8")
         )
-        
+
         model_line = next((line for line in output.split("\n") if "Model Name" in line), None)
         model_id = model_line.split(": ")[1] if model_line else "Unknown Model"
-        
+
         chip_line = next((line for line in output.split("\n") if "Chip" in line), None)
         chip_id = chip_line.split(": ")[1] if chip_line else "Unknown Chip"
-        
+
         memory_line = next((line for line in output.split("\n") if "Memory" in line), None)
         memory_str = memory_line.split(": ")[1] if memory_line else "Unknown Memory"
         memory_units = memory_str.split()
         memory_value = int(memory_units[0])
         memory = memory_value * 1024 if memory_units[1] == "GB" else memory_value
-        
+
         return model_id, chip_id, memory
     except Exception as e:
         if DEBUG >= 2: print(f"Error getting Mac system info: {e}")
