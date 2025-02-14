@@ -3,7 +3,7 @@ import numpy as np
 import asyncio
 from typing import Optional, Tuple, List
 
-from exo.orchestration.node import GenerationOptions
+from exo.inference.generation_options import GenerationOptions
 
 from . import node_service_pb2
 from . import node_service_pb2_grpc
