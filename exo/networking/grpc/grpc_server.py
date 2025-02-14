@@ -5,6 +5,8 @@ from asyncio import CancelledError
 
 import platform
 
+from exo.inference.generation_options import GenerationOptions
+
 from . import node_service_pb2
 from . import node_service_pb2_grpc
 from exo import DEBUG
@@ -67,7 +69,10 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
     prompt = request.prompt
     request_id = request.request_id
     inference_state = None if request.inference_state is None else self.deserialize_inference_state(request.inference_state)
-    result = await self.node.process_prompt(shard, prompt, request_id, inference_state)
+    generation_options = None if request.generation_options is None else GenerationOptions(
+      max_completion_tokens=request.generation_options.max_completion_tokens
+    )
+    result = await self.node.process_prompt(shard, prompt, request_id, inference_state, generation_options)
     if DEBUG >= 5: print(f"SendPrompt {shard=} {prompt=} {request_id=} result: {result}")
     tensor_data = result.tobytes() if result is not None else None
     return node_service_pb2.Tensor(tensor_data=tensor_data, shape=result.shape, dtype=str(result.dtype)) if result is not None else node_service_pb2.Tensor()
@@ -83,8 +88,11 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
     request_id = request.request_id
 
     inference_state = None if request.inference_state is None else self.deserialize_inference_state(request.inference_state)
+    generation_options = None if request.generation_options is None else GenerationOptions(
+      max_completion_tokens=request.generation_options.max_completion_tokens
+    )
 
-    result = await self.node.process_tensor(shard, tensor, request_id, inference_state)
+    result = await self.node.process_tensor(shard, tensor, request_id, inference_state, generation_options)
     if DEBUG >= 5: print(f"SendTensor tensor {shard=} {tensor=} {request_id=} result: {result}")
     tensor_data = result.tobytes() if result is not None else None
     return node_service_pb2.Tensor(tensor_data=tensor_data, shape=result.shape, dtype=str(result.dtype)) if result is not None else node_service_pb2.Tensor()
