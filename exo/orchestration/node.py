@@ -110,9 +110,7 @@ class Node:
 
   def get_topology_inference_engines(self) -> List[List[str]]:
     return self.topology_inference_engines_pool
-  
-  token_count = 0
-  first_token_time = 0
+
   async def process_inference_result(
     self,
     shard,
@@ -120,39 +118,65 @@ class Node:
     request_id: Optional[str] = None,
     inference_state: Optional[dict] = None,
   ):
-    if shard.model_id != 'stable-diffusion-2-1-base':
-      if request_id not in self.buffered_token_output:
-        self.buffered_token_output[request_id] = ([], False)
-      is_finished = len(self.buffered_token_output[request_id][0]) >= self.max_generate_tokens
-      if shard.is_last_layer() and not is_finished:
-        token = await self.inference_engine.sample(result, temp=self.default_sample_temperature)
-        await self.inference_engine.ensure_shard(shard)
-        self.buffered_token_output[request_id][0].append(token.item())
-        is_finished = token.item() == self.inference_engine.tokenizer.eos_token_id or is_finished or len(self.buffered_token_output[request_id][0]) >= self.max_generate_tokens
-        if DEBUG >= 2: print(f"[{request_id}] result size: {result.size}, is finished: {is_finished}, buffered tokens: {len(self.buffered_token_output[request_id][0])}")
-        forward = token.reshape(1, -1)
-        intermediate_result = [self.buffered_token_output[request_id][0][-1]]
-      else:
-        forward = result
-    else:
+    if request_id not in self.buffered_token_output:
+      self.buffered_token_output[request_id] = ([], False)
+
+    if shard.model_id == 'stable-diffusion-2-1-base':
       await self.inference_engine.ensure_shard(shard)
       is_finished = inference_state.get("is_finished", False)
       intermediate_result, inference_state = self.handle_stable_diffusion(inference_state, result)
       forward = result
+
+      if is_finished:
+        self.buffered_token_output[request_id] = (self.buffered_token_output[request_id][0], True)
+        self.outstanding_requests.pop(request_id)
+      else:
+        self.outstanding_requests[request_id] = "waiting"
+        asyncio.create_task(self.forward_tensor(
+          shard,
+          forward,
+          request_id,
+          self.get_partition_index(offset=1), inference_state
+        ))
+
+      return intermediate_result
+
+    if len(self.buffered_token_output[request_id][0]) >= self.max_generate_tokens:
+      raise Exception("We should never get to this state already finished")
+
     if shard.is_last_layer():
+      await self.inference_engine.ensure_shard(shard)
+      token = await self.inference_engine.sample(result, temp=self.default_sample_temperature)
+
+      self.buffered_token_output[request_id][0].append(token.item())
+      is_finished = (
+        token.item() == self.inference_engine.tokenizer.eos_token_id
+        or len(self.buffered_token_output[request_id][0]) >= self.max_generate_tokens
+      )
+
+      intermediate_result = [token.item()]
       self.trigger_on_token_callbacks(request_id, intermediate_result, is_finished)
       asyncio.create_task(self.broadcast_result(request_id, intermediate_result, is_finished))
 
-    if is_finished:
-      if shard.model_id != 'stable-diffusion-2-1-base':
-        self.buffered_token_output[request_id] = (self.buffered_token_output[request_id][0], True)
-      self.outstanding_requests.pop(request_id)
+      if is_finished:
+        self.outstanding_requests.pop(request_id)
+      else:
+        self.outstanding_requests[request_id] = "waiting"
+        result = token.reshape(1, -1)
     else:
       self.outstanding_requests[request_id] = "waiting"
-      asyncio.create_task(self.forward_tensor(shard, forward, request_id, self.get_partition_index(offset = 1), inference_state))
 
-    return  np.array(self.buffered_token_output[request_id][0]) if shard.model_id != 'stable-diffusion-2-1-base' else intermediate_result
+    # Forward the result on if there are further layers, or if we are the last layer but not generating
+    if (shard.is_last_layer() and not is_finished) or not shard.is_first_layer():
+      asyncio.create_task(self.forward_tensor(
+        shard,
+        result,
+        request_id,
+        self.get_partition_index(offset=1),
+        inference_state
+      ))
 
+    return np.array(self.buffered_token_output[request_id][0])
 
   async def process_prompt(
     self,
