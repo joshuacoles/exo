@@ -176,7 +176,7 @@ class Node:
       self.outstanding_requests[request_id] = "waiting"
 
     # Forward the result on if there are further layers, or if we are the last layer but not generating
-    if (shard.is_last_layer() and not is_finished) or not shard.is_first_layer():
+    if (shard.is_last_layer() and not is_finished) or not shard.is_last_layer():
       asyncio.create_task(self.forward_tensor(
         shard,
         result,
