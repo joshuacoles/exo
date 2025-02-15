@@ -154,11 +154,11 @@ class Node:
       token = await self.inference_engine.sample(result, temp=self.default_sample_temperature)
 
       is_eos_token = token.item() == self.inference_engine.tokenizer.eos_token_id
+      self.buffered_token_output[request_id][0].append(token.item())
 
       if is_eos_token:
         is_finished = True
       else:
-        self.buffered_token_output[request_id][0].append(token.item())
         generated_tokens = len(self.buffered_token_output[request_id][0])
         is_finished = generated_tokens >= self.max_generate_tokens
 
