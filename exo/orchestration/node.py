@@ -160,8 +160,10 @@ class Node:
       else:
         self.buffered_token_output[request_id][0].append(token.item())
         generated_tokens = len(self.buffered_token_output[request_id][0])
-        is_finished = (generated_tokens >= self.max_generate_tokens
-                      or generation_options.max_completion_tokens is not None and generated_tokens >= generation_options.max_completion_tokens)
+        is_finished = generated_tokens >= self.max_generate_tokens
+
+        if generation_options is not None and generation_options.max_completion_tokens is not None:
+          is_finished = is_finished or generated_tokens >= generation_options.max_completion_tokens
 
       intermediate_result = [token.item()]
       self.trigger_on_token_callbacks(request_id, intermediate_result, is_finished)

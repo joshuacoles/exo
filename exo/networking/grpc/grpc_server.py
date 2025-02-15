@@ -74,9 +74,7 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
     prompt = request.prompt
     request_id = request.request_id
     inference_state = None if request.inference_state is None else self.deserialize_inference_state(request.inference_state)
-    generation_options = None if request.generation_options is None else GenerationOptions(
-      max_completion_tokens=request.generation_options.max_completion_tokens
-    )
+    generation_options = None if request.generation_options is None else self.deserialize_generation_options(request.generation_options)
     logger.debug(f"Received SendPrompt request: {shard=} {prompt=} {request_id=} {inference_state=} {generation_options=}")
     result = await self.node.process_prompt(shard, prompt, request_id, inference_state, generation_options)
     logger.debug(f"SendPrompt {shard=} {prompt=} {request_id=} result: {result}")
@@ -94,9 +92,7 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
     request_id = request.request_id
 
     inference_state = None if request.inference_state is None else self.deserialize_inference_state(request.inference_state)
-    generation_options = None if request.generation_options is None else GenerationOptions(
-      max_completion_tokens=request.generation_options.max_completion_tokens
-    )
+    generation_options = None if request.generation_options is None else self.deserialize_generation_options(request.generation_options)
 
     logger.debug(f"Received SendTensor request: {shard=} {tensor=} {request_id=} {inference_state=} {generation_options=}")
     result = await self.node.process_tensor(shard, tensor, request_id, inference_state, generation_options)
@@ -184,3 +180,8 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
       inference_state.update(other_data)
 
     return inference_state
+
+  def deserialize_generation_options(self, generation_options_proto: node_service_pb2.GenerationOptions) -> GenerationOptions:
+    return GenerationOptions(
+      max_completion_tokens=generation_options_proto.max_completion_tokens if generation_options_proto.HasField("max_completion_tokens") else None
+    )
