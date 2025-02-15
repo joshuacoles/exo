@@ -396,9 +396,14 @@ class ChatGPTAPI:
             if not eos_token_id and hasattr(tokenizer, "eos_token_id"): eos_token_id = tokenizer.eos_token_id
             if not eos_token_id and hasattr(tokenizer, "_tokenizer"): eos_token_id = tokenizer.special_tokens_map.get("eos_token_id")
 
+            final_token_is_eos = tokens[-1] == eos_token_id
             finish_reason = None
-            if is_finished: finish_reason = "stop" if tokens[-1] == eos_token_id else "length"
+            if is_finished: finish_reason = "stop" if final_token_is_eos else "length"
             if DEBUG >= 2: print(f"{eos_token_id=} {tokens[-1]=} {finish_reason=}")
+
+            # We do not return the EOS token in the response
+            if final_token_is_eos:
+              tokens.pop(-1)
 
             completion = generate_completion(
               chat_request,
