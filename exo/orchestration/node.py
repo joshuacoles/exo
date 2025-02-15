@@ -531,10 +531,6 @@ class Node:
     def _pretty(peers: List[PeerHandle]) -> List[str]:
       return [f"{peer.id()}@{peer.addr()}" for peer in peers]
 
-    if DEBUG >= 2:
-      print(
-        f"update_peers: added={peers_added} removed={peers_removed} updated={peers_updated} unchanged={peers_unchanged} to_disconnect={peers_to_disconnect} to_connect={peers_to_connect}")
-
     async def disconnect_with_timeout(peer, timeout=5):
       try:
         await asyncio.wait_for(peer.disconnect(), timeout)
@@ -583,7 +579,6 @@ class Node:
       await asyncio.sleep(interval)
       try:
         did_peers_change = await self.update_peers()
-        if DEBUG >= 2: print(f"{did_peers_change=}")
         await self.collect_topology(set())
         if did_peers_change:
           await self.select_best_inference_engine()
@@ -594,8 +589,6 @@ class Node:
   async def collect_topology(self, visited: set[str], max_depth: int = 4) -> Topology:
     next_topology = Topology()
     next_topology.update_node(self.id, self.device_capabilities)
-
-    if DEBUG >= 2: print(f"Collecting topology {max_depth=} {visited=}")
 
     prev_visited = visited.copy()
     visited.add(self.id)
@@ -614,7 +607,6 @@ class Node:
 
       try:
         other_topology = await asyncio.wait_for(peer.collect_topology(visited, max_depth=max_depth - 1), timeout=5.0)
-        if DEBUG >= 2: print(f"Collected topology from: {peer.id()}: {other_topology}")
         next_topology.merge(peer.id(), other_topology)
       except Exception as e:
         print(f"Error collecting topology from {peer.id()}: {e}")
