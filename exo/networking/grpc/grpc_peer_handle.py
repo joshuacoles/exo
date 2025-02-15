@@ -16,6 +16,11 @@ from exo.helpers import DEBUG
 import json
 import platform
 
+from logging import getLogger, DEBUG as DEBUG_LOG_LEVEL
+
+logger = getLogger(__name__)
+logger.setLevel(DEBUG_LOG_LEVEL)
+
 if platform.system().lower() == "darwin" and platform.machine().lower() == "arm64":
   import mlx.core as mx
 else:
@@ -114,7 +119,9 @@ class GRPCPeerHandle(PeerHandle):
         max_completion_tokens=generation_options.max_completion_tokens
       )
     )
+    logger.debug(f"Sending prompt to {self._id}@{self.address}: {request}")
     await self.stub.SendPrompt(request)
+    logger.debug(f"Sent prompt to {self._id}@{self.address}")
 
   async def send_tensor(self, shard: Shard, tensor: np.ndarray, inference_state: Optional[dict] = None, request_id: Optional[str] = None, generation_options: Optional[GenerationOptions] = None) -> Optional[np.array]:
     request = node_service_pb2.TensorRequest(
@@ -131,7 +138,9 @@ class GRPCPeerHandle(PeerHandle):
         max_completion_tokens=generation_options.max_completion_tokens
       )
     )
+    logger.debug(f"Sending tensor to {self._id}@{self.address}: {request}")
     response = await self.stub.SendTensor(request)
+    logger.debug(f"Sent tensor to {self._id}@{self.address}: {response}")
 
     if not response.tensor_data or not response.shape or not response.dtype:
       return None
@@ -198,7 +207,9 @@ class GRPCPeerHandle(PeerHandle):
       tensor = node_service_pb2.Tensor(tensor_data=result.tobytes(), shape=result.shape, dtype=str(result.dtype))
       result = []
     request = node_service_pb2.SendResultRequest(request_id=request_id, result=result, tensor=tensor, is_finished=is_finished)
+    logger.debug(f"Sending result to {self._id}@{self.address}: {request}")
     await self.stub.SendResult(request)
+    logger.debug(f"Sent result to {self._id}@{self.address}")
 
   async def send_opaque_status(self, request_id: str, status: str) -> None:
     request = node_service_pb2.SendOpaqueStatusRequest(request_id=request_id, status=status)
