@@ -33,8 +33,14 @@ import concurrent.futures
 import resource
 import psutil
 
+from logging import getLogger, DEBUG as DEBUG_LOG_LEVEL
+
+logger = getLogger()
+logger.setLevel(DEBUG_LOG_LEVEL)
+
+
 # TODO: figure out why this is happening
-os.environ["GRPC_VERBOSITY"] = "error"
+os.environ["GRPC_VERBOSITY"] = "info"
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 

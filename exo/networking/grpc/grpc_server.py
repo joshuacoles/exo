@@ -19,6 +19,11 @@ if platform.system().lower() == "darwin" and platform.machine().lower() == "arm6
 else:
   import numpy as mx
 
+from logging import getLogger, DEBUG as DEBUG_LOG_LEVEL
+
+logger = getLogger(__name__)
+logger.setLevel(DEBUG_LOG_LEVEL)
+
 
 class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
   def __init__(self, node: Node, host: str, port: int):
@@ -72,8 +77,9 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
     generation_options = None if request.generation_options is None else GenerationOptions(
       max_completion_tokens=request.generation_options.max_completion_tokens
     )
+    logger.debug(f"Received SendPrompt request: {shard=} {prompt=} {request_id=} {inference_state=} {generation_options=}")
     result = await self.node.process_prompt(shard, prompt, request_id, inference_state, generation_options)
-    if DEBUG >= 5: print(f"SendPrompt {shard=} {prompt=} {request_id=} result: {result}")
+    logger.debug(f"SendPrompt {shard=} {prompt=} {request_id=} result: {result}")
     tensor_data = result.tobytes() if result is not None else None
     return node_service_pb2.Tensor(tensor_data=tensor_data, shape=result.shape, dtype=str(result.dtype)) if result is not None else node_service_pb2.Tensor()
 
@@ -92,8 +98,9 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
       max_completion_tokens=request.generation_options.max_completion_tokens
     )
 
+    logger.debug(f"Received SendTensor request: {shard=} {tensor=} {request_id=} {inference_state=} {generation_options=}")
     result = await self.node.process_tensor(shard, tensor, request_id, inference_state, generation_options)
-    if DEBUG >= 5: print(f"SendTensor tensor {shard=} {tensor=} {request_id=} result: {result}")
+    logger.debug(f"SendTensor {shard=} {tensor=} {request_id=} result: {result}")
     tensor_data = result.tobytes() if result is not None else None
     return node_service_pb2.Tensor(tensor_data=tensor_data, shape=result.shape, dtype=str(result.dtype)) if result is not None else node_service_pb2.Tensor()
 
@@ -145,7 +152,7 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
     result = request.result
     is_finished = request.is_finished
     img = request.tensor
-    if DEBUG >= 5: print(f"Received SendResult request: {request_id=} {result=} {is_finished=}")
+    logger.debug(f"Received SendResult request: {request_id=} {result=} {is_finished=}")
     result = list(result)
     if len(img.tensor_data) > 0:
       result = np.frombuffer(img.tensor_data, dtype=np.dtype(img.dtype)).reshape(img.shape)
