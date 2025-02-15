@@ -244,7 +244,7 @@ class Node:
     if not shard.is_first_layer():
       if DEBUG >= 2: print(f"[{request_id}] forwarding to next shard: {base_shard=} {shard=} {prompt=}")
       self.outstanding_requests[request_id] = "waiting"
-      resp = await self.forward_prompt(shard, prompt, request_id, 0, inference_state, generation_options)
+      await self.forward_prompt(shard, prompt, request_id, 0, inference_state, generation_options)
       return None
     else:
       self.outstanding_requests[request_id] = "processing"
