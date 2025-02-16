@@ -49,18 +49,18 @@ class Message:
 
 class ChatCompletionRequest:
   def __init__(self, model: str, messages: List[Message], temperature: float, tools: Optional[List[Dict]] = None,
-               max_completion_tokens: Optional[int] = None, stops: Optional[List[str]] = None):
+               max_completion_tokens: Optional[int] = None, stop: Optional[List[str]] = None):
     self.model = model
     self.messages = messages
     self.temperature = temperature
     self.tools = tools
     self.max_completion_tokens = max_completion_tokens
-    self.stops = stops
+    self.stop = stop
 
   def to_dict(self):
     return {"model": self.model, "messages": [message.to_dict() for message in self.messages],
             "temperature": self.temperature, "tools": self.tools, "max_completion_tokens": self.max_completion_tokens,
-            "stops": self.stops}
+            "stop": self.stop}
 
 
 def generate_completion(
@@ -175,6 +175,7 @@ def parse_chat_request(data: dict, default_model: str):
     data.get("temperature", 0.0),
     data.get("tools", None),
     data.get("max_completion_tokens", None),
+    data.get("stop", None),
   )
 
 
@@ -368,7 +369,7 @@ class ChatGPTAPI:
         shard,
         prompt,
         request_id=request_id,
-        generation_options=GenerationOptions(max_completion_tokens=chat_request.max_completion_tokens, stops=chat_request.stops)
+        generation_options=GenerationOptions(max_completion_tokens=chat_request.max_completion_tokens, stop=chat_request.stop)
       ))), timeout=self.response_timeout)
 
       if DEBUG >= 2: print(f"[ChatGPTAPI] Waiting for response to finish. timeout={self.response_timeout}s")
