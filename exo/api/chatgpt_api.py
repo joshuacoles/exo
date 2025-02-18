@@ -174,7 +174,10 @@ def parse_chat_request(data: dict, default_model: str):
     [parse_message(msg) for msg in data["messages"]],
     data.get("temperature", 0.0),
     data.get("tools", None),
-    data.get("max_completion_tokens", None),
+
+    # The max_tokens field is deprecated, but some clients may still use it, fall back to that value if
+    # max_completion_tokens is not provided.
+    data.get("max_completion_tokens", data.get("max_tokens", None)),
     data.get("stop", None),
   )
 
