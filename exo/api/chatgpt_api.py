@@ -14,6 +14,7 @@ from exo import DEBUG, VERSION
 from exo.helpers import PrefixDict, shutdown, get_exo_images_dir
 from exo.inference.tokenizers import resolve_tokenizer
 from exo.orchestration import Node
+from exo.inference.generation_options import GenerationOptions
 from exo.models import build_base_shard, build_full_shard, model_cards, get_repo, get_supported_models, get_pretty_name
 from typing import Callable, Optional
 from PIL import Image
@@ -47,14 +48,19 @@ class Message:
 
 
 class ChatCompletionRequest:
-  def __init__(self, model: str, messages: List[Message], temperature: float, tools: Optional[List[Dict]] = None):
+  def __init__(self, model: str, messages: List[Message], temperature: float, tools: Optional[List[Dict]] = None,
+               max_completion_tokens: Optional[int] = None, stop: Optional[Union[str, List[str]]] = None):
     self.model = model
     self.messages = messages
     self.temperature = temperature
     self.tools = tools
+    self.max_completion_tokens = max_completion_tokens
+    self.stop = stop if isinstance(stop, list) else [stop] if isinstance(stop, str) else None
 
   def to_dict(self):
-    return {"model": self.model, "messages": [message.to_dict() for message in self.messages], "temperature": self.temperature, "tools": self.tools}
+    return {"model": self.model, "messages": [message.to_dict() for message in self.messages],
+            "temperature": self.temperature, "tools": self.tools, "max_completion_tokens": self.max_completion_tokens,
+            "stop": self.stop}
 
 
 def generate_completion(
@@ -137,7 +143,7 @@ def remap_messages(messages: List[Message]) -> List[Message]:
 def build_prompt(tokenizer, _messages: List[Message], tools: Optional[List[Dict]] = None):
   messages = remap_messages(_messages)
   chat_template_args = {"conversation": [m.to_dict() for m in messages], "tokenize": False, "add_generation_prompt": True}
-  if tools: 
+  if tools:
     chat_template_args["tools"] = tools
 
   try:
@@ -147,7 +153,7 @@ def build_prompt(tokenizer, _messages: List[Message], tools: Optional[List[Dict]
   except UnicodeEncodeError:
     # Handle Unicode encoding by ensuring everything is UTF-8
     chat_template_args["conversation"] = [
-      {k: v.encode('utf-8').decode('utf-8') if isinstance(v, str) else v 
+      {k: v.encode('utf-8').decode('utf-8') if isinstance(v, str) else v
        for k, v in m.to_dict().items()}
       for m in messages
     ]
@@ -168,6 +174,11 @@ def parse_chat_request(data: dict, default_model: str):
     [parse_message(msg) for msg in data["messages"]],
     data.get("temperature", 0.0),
     data.get("tools", None),
+
+    # The max_tokens field is deprecated, but some clients may still use it, fall back to that value if
+    # max_completion_tokens is not provided.
+    data.get("max_completion_tokens", data.get("max_tokens", None)),
+    data.get("stop", None),
   )
 
 
@@ -201,7 +212,7 @@ class ChatGPTAPI:
 
     # Get the callback system and register our handler
     self.token_callback = node.on_token.register("chatgpt-api-token-handler")
-    self.token_callback.on_next(lambda _request_id, tokens, is_finished: asyncio.create_task(self.handle_tokens(_request_id, tokens, is_finished)))
+    self.token_callback.on_next(lambda _request_id, tokens, is_finished, finish_reason: asyncio.create_task(self.handle_tokens(_request_id, tokens, is_finished, finish_reason)))
     self.system_prompt = system_prompt
 
     cors = aiohttp_cors.setup(self.app)
@@ -234,7 +245,7 @@ class ChatGPTAPI:
       self.static_dir = Path(__file__).parent.parent/"tinychat"
       self.app.router.add_get("/", self.handle_root)
       self.app.router.add_static("/", self.static_dir, name="static")
-      
+
     # Always add images route, regardless of compilation status
     self.images_dir = get_exo_images_dir()
     self.images_dir.mkdir(parents=True, exist_ok=True)
@@ -357,7 +368,12 @@ class ChatGPTAPI:
     if DEBUG >= 2: print(f"[ChatGPTAPI] Processing prompt: {request_id=} {shard=} {prompt=}")
 
     try:
-      await asyncio.wait_for(asyncio.shield(asyncio.create_task(self.node.process_prompt(shard, prompt, request_id=request_id))), timeout=self.response_timeout)
+      await asyncio.wait_for(asyncio.shield(asyncio.create_task(self.node.process_prompt(
+        shard,
+        prompt,
+        request_id=request_id,
+        generation_options=GenerationOptions(max_completion_tokens=chat_request.max_completion_tokens, stop=chat_request.stop)
+      ))), timeout=self.response_timeout)
 
       if DEBUG >= 2: print(f"[ChatGPTAPI] Waiting for response to finish. timeout={self.response_timeout}s")
 
@@ -376,19 +392,21 @@ class ChatGPTAPI:
           # Stream tokens while waiting for inference to complete
           while True:
             if DEBUG >= 2: print(f"[ChatGPTAPI] Waiting for token from queue: {request_id=}")
-            tokens, is_finished = await asyncio.wait_for(
+            tokens, is_finished, finish_reason = await asyncio.wait_for(
               self.token_queues[request_id].get(),
               timeout=self.response_timeout
             )
-            if DEBUG >= 2: print(f"[ChatGPTAPI] Got token from queue: {request_id=} {tokens=} {is_finished=}")
+            if DEBUG >= 2: print(f"[ChatGPTAPI] Got token from queue: {request_id=} {tokens=} {is_finished=} {finish_reason=}")
 
             eos_token_id = None
             if not eos_token_id and hasattr(tokenizer, "eos_token_id"): eos_token_id = tokenizer.eos_token_id
             if not eos_token_id and hasattr(tokenizer, "_tokenizer"): eos_token_id = tokenizer.special_tokens_map.get("eos_token_id")
 
-            finish_reason = None
-            if is_finished: finish_reason = "stop" if tokens[-1] == eos_token_id else "length"
             if DEBUG >= 2: print(f"{eos_token_id=} {tokens[-1]=} {finish_reason=}")
+
+            # We do not return the EOS token in the response
+            if tokens[-1] == eos_token_id:
+              tokens.pop(-1)
 
             completion = generate_completion(
               chat_request,
@@ -414,7 +432,7 @@ class ChatGPTAPI:
           return web.json_response({"detail": "Response generation timed out"}, status=408)
 
         except Exception as e:
-          if DEBUG >= 2: 
+          if DEBUG >= 2:
             print(f"[ChatGPTAPI] Error processing prompt: {e}")
             traceback.print_exc()
           return web.json_response(
@@ -430,17 +448,16 @@ class ChatGPTAPI:
       else:
         tokens = []
         while True:
-          _tokens, is_finished = await asyncio.wait_for(self.token_queues[request_id].get(), timeout=self.response_timeout)
+          _tokens, is_finished, finish_reason = await asyncio.wait_for(self.token_queues[request_id].get(), timeout=self.response_timeout)
           tokens.extend(_tokens)
           if is_finished:
             break
-        finish_reason = "length"
         eos_token_id = None
         if not eos_token_id and hasattr(tokenizer, "eos_token_id"): eos_token_id = tokenizer.eos_token_id
         if not eos_token_id and hasattr(tokenizer, "_tokenizer"): eos_token_id = tokenizer.special_tokens_map.get("eos_token_id")
         if DEBUG >= 2: print(f"Checking if end of tokens result {tokens[-1]=} is {eos_token_id=}")
         if tokens[-1] == eos_token_id:
-          finish_reason = "stop"
+          tokens.pop(-1)
 
         return web.json_response(generate_completion(chat_request, tokenizer, prompt, request_id, tokens, stream, finish_reason, "chat.completion"))
     except asyncio.TimeoutError:
@@ -501,22 +518,22 @@ class ChatGPTAPI:
             image_filename = f"{_request_id}.png"
             image_path = self.images_dir/image_filename
             im.save(image_path)
-            
+
             # Get URL for the saved image
             try:
               image_url = request.app.router['static_images'].url_for(filename=image_filename)
               base_url = f"{request.scheme}://{request.host}"
               full_image_url = base_url + str(image_url)
-              
+
               await response.write(json.dumps({'images': [{'url': str(full_image_url), 'content_type': 'image/png'}]}).encode('utf-8') + b'\n')
             except KeyError as e:
               if DEBUG >= 2: print(f"Error getting image URL: {e}")
               # Fallback to direct file path if URL generation fails
               await response.write(json.dumps({'images': [{'url': str(image_path), 'content_type': 'image/png'}]}).encode('utf-8') + b'\n')
-            
+
             if is_finished:
               await response.write_eof()
-            
+
           except Exception as e:
             if DEBUG >= 2: print(f"Error processing image: {e}")
             if DEBUG >= 2: traceback.print_exc()
@@ -524,9 +541,9 @@ class ChatGPTAPI:
 
       stream_task = None
 
-      def on_result(_request_id: str, result, is_finished: bool):
+      def on_result(_request_id: str, result, is_finished: bool, finish_reason: Optional[str] = None):
         nonlocal stream_task
-        stream_task = asyncio.create_task(stream_image(_request_id, result, is_finished))
+        stream_task = asyncio.create_task(stream_image(_request_id, result, is_finished, finish_reason))
         return _request_id == request_id and is_finished
 
       await callback.wait(on_result, timeout=self.response_timeout*10)
@@ -620,8 +637,8 @@ class ChatGPTAPI:
       if DEBUG >= 2: traceback.print_exc()
       return web.json_response({"detail": f"Error getting topology: {str(e)}"}, status=500)
 
-  async def handle_tokens(self, request_id: str, tokens: List[int], is_finished: bool):
-    await self.token_queues[request_id].put((tokens, is_finished))
+  async def handle_tokens(self, request_id: str, tokens: List[int], is_finished: bool, finish_reason: Optional[str] = None):
+    await self.token_queues[request_id].put((tokens, is_finished, finish_reason))
 
   async def run(self, host: str = "0.0.0.0", port: int = 52415):
     runner = web.AppRunner(self.app)

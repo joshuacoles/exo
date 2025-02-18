@@ -15,9 +15,9 @@ class DummyInferenceEngine(InferenceEngine):
     self.num_generate_dummy_tokens = 10
     self.tokenizer = DummyTokenizer()
 
-  async def encode(self, shard: Shard, prompt: str) -> np.ndarray:
-    return np.array(self.tokenizer.encode(prompt))
-  
+  async def encode(self, shard: Shard, prompt: str, **kwargs) -> np.ndarray:
+    return np.array(self.tokenizer.encode(prompt, **kwargs))
+
   async def sample(self, x: np.ndarray, temp: float = 0.0, top_p: float = 1.0) -> np.ndarray:
     if x[0] > self.num_generate_dummy_tokens: return np.array([self.tokenizer.eos_token_id])
     return x
@@ -32,6 +32,6 @@ class DummyInferenceEngine(InferenceEngine):
   async def ensure_shard(self, shard: Shard):
     if self.shard == shard: return
     self.shard = shard
-  
+
   async def load_checkpoint(self, shard: Shard, path: str):
     await self.ensure_shard(shard)
