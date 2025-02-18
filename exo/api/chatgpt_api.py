@@ -392,23 +392,20 @@ class ChatGPTAPI:
           # Stream tokens while waiting for inference to complete
           while True:
             if DEBUG >= 2: print(f"[ChatGPTAPI] Waiting for token from queue: {request_id=}")
-            tokens, is_finished = await asyncio.wait_for(
+            tokens, is_finished, finish_reason = await asyncio.wait_for(
               self.token_queues[request_id].get(),
               timeout=self.response_timeout
             )
-            if DEBUG >= 2: print(f"[ChatGPTAPI] Got token from queue: {request_id=} {tokens=} {is_finished=}")
+            if DEBUG >= 2: print(f"[ChatGPTAPI] Got token from queue: {request_id=} {tokens=} {is_finished=} {finish_reason=}")
 
             eos_token_id = None
             if not eos_token_id and hasattr(tokenizer, "eos_token_id"): eos_token_id = tokenizer.eos_token_id
             if not eos_token_id and hasattr(tokenizer, "_tokenizer"): eos_token_id = tokenizer.special_tokens_map.get("eos_token_id")
 
-            final_token_is_eos = tokens[-1] == eos_token_id
-            finish_reason = None
-            if is_finished: finish_reason = "stop" if final_token_is_eos else "length"
             if DEBUG >= 2: print(f"{eos_token_id=} {tokens[-1]=} {finish_reason=}")
 
             # We do not return the EOS token in the response
-            if final_token_is_eos:
+            if tokens[-1] == eos_token_id:
               tokens.pop(-1)
 
             completion = generate_completion(
@@ -451,18 +448,16 @@ class ChatGPTAPI:
       else:
         tokens = []
         while True:
-          _tokens, is_finished = await asyncio.wait_for(self.token_queues[request_id].get(), timeout=self.response_timeout)
+          _tokens, is_finished, finish_reason = await asyncio.wait_for(self.token_queues[request_id].get(), timeout=self.response_timeout)
           tokens.extend(_tokens)
           if is_finished:
             break
-        finish_reason = "length"
         eos_token_id = None
         if not eos_token_id and hasattr(tokenizer, "eos_token_id"): eos_token_id = tokenizer.eos_token_id
         if not eos_token_id and hasattr(tokenizer, "_tokenizer"): eos_token_id = tokenizer.special_tokens_map.get("eos_token_id")
         if DEBUG >= 2: print(f"Checking if end of tokens result {tokens[-1]=} is {eos_token_id=}")
         if tokens[-1] == eos_token_id:
           tokens.pop(-1)
-          finish_reason = "stop"
 
         return web.json_response(generate_completion(chat_request, tokenizer, prompt, request_id, tokens, stream, finish_reason, "chat.completion"))
     except asyncio.TimeoutError:
@@ -642,8 +637,8 @@ class ChatGPTAPI:
       if DEBUG >= 2: traceback.print_exc()
       return web.json_response({"detail": f"Error getting topology: {str(e)}"}, status=500)
 
-  async def handle_tokens(self, request_id: str, tokens: List[int], is_finished: bool):
-    await self.token_queues[request_id].put((tokens, is_finished))
+  async def handle_tokens(self, request_id: str, tokens: List[int], is_finished: bool, finish_reason: Optional[str] = None):
+    await self.token_queues[request_id].put((tokens, is_finished, finish_reason))
 
   async def run(self, host: str = "0.0.0.0", port: int = 52415):
     runner = web.AppRunner(self.app)
