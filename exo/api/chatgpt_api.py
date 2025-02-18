@@ -212,7 +212,7 @@ class ChatGPTAPI:
 
     # Get the callback system and register our handler
     self.token_callback = node.on_token.register("chatgpt-api-token-handler")
-    self.token_callback.on_next(lambda _request_id, tokens, is_finished: asyncio.create_task(self.handle_tokens(_request_id, tokens, is_finished)))
+    self.token_callback.on_next(lambda _request_id, tokens, is_finished, finish_reason: asyncio.create_task(self.handle_tokens(_request_id, tokens, is_finished, finish_reason)))
     self.system_prompt = system_prompt
 
     cors = aiohttp_cors.setup(self.app)
@@ -546,9 +546,9 @@ class ChatGPTAPI:
 
       stream_task = None
 
-      def on_result(_request_id: str, result, is_finished: bool):
+      def on_result(_request_id: str, result, is_finished: bool, finish_reason: Optional[str] = None):
         nonlocal stream_task
-        stream_task = asyncio.create_task(stream_image(_request_id, result, is_finished))
+        stream_task = asyncio.create_task(stream_image(_request_id, result, is_finished, finish_reason))
         return _request_id == request_id and is_finished
 
       await callback.wait(on_result, timeout=self.response_timeout*10)
