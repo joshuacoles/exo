@@ -46,6 +46,7 @@ class Node:
     self.buffered_inputs: Dict[str, List[np.ndarray]] = {}
     self.buffered_partials: Dict[str, List[np.ndarray]] = {}
     self.checkpoints: Dict[str, Dict[str, int]] = {}
+    self.decodable_buffer: Dict[str, str] = {}
 
     self.max_generate_tokens = max_generate_tokens
     self.topology_viz = topology_viz
@@ -126,6 +127,9 @@ class Node:
     if request_id not in self.buffered_token_output:
       self.buffered_token_output[request_id] = ([], False)
 
+    if request_id not in self.decodable_buffer:
+      self.decodable_buffer[request_id] = ""
+
     if shard.model_id == 'stable-diffusion-2-1-base':
       await self.inference_engine.ensure_shard(shard)
       is_finished = inference_state.get("is_finished", False)
@@ -153,19 +157,59 @@ class Node:
       await self.inference_engine.ensure_shard(shard)
       token = await self.inference_engine.sample(result, temp=self.default_sample_temperature)
 
+      # Preliminarily create a new tokens list
+      current_text = self.decodable_buffer[request_id] + self.inference_engine.tokenizer.decode([token.item()])
+
+      # Check for stop sequences
+      stop_triggered = False
+      if generation_options and generation_options.stop:
+          # Get the longest stop sequence first
+          max_stop_len = max(len(seq) for seq in generation_options.stop)
+          text_to_check = current_text[-max_stop_len:]  # Only check relevant portion
+          stop_sequences = sorted(generation_options.stop, key=lambda x: -len(x))
+
+          for stop_seq in stop_sequences:
+              if text_to_check.endswith(stop_seq):
+                  # Calculate split position in full text
+                  split_pos = len(current_text) - len(stop_seq)
+                  if generation_options.include_stop:
+                      split_pos += len(stop_seq)
+
+                  # FIXME: If a stop sequence is a sub-section of a token, what is the expected behaviour. Should the
+                  #  initial part of that token be emitted as a different token, or should we strip it all? I suppose
+                  #  the stop sequences act on the text level so splitting makes sense. We are really relying on the
+                  #  token mapping being surjective over the string space to guarantee a token sequence for the text we
+                  #  are chopping up here.
+                  # Get exact tokens for text up to split point
+                  pre_stop_text = current_text[:split_pos]
+                  pre_stop_tokens = self.inference_engine.tokenizer.encode(pre_stop_text)
+
+                  # Update buffers
+                  self.buffered_token_output[request_id] = (pre_stop_tokens, True)
+                  self.decodable_buffer[request_id] = pre_stop_text
+                  stop_triggered = True
+                  break
+
+      if not stop_triggered:
+          # No stop found, append new token
+          self.buffered_token_output[request_id][0].append(token.item())
+
       is_eos_token = token.item() == self.inference_engine.tokenizer.eos_token_id
-      self.buffered_token_output[request_id][0].append(token.item())
+      generated_tokens = len(self.buffered_token_output[request_id][0])
 
-      if is_eos_token:
-        is_finished = True
+      # Determine completion status
+      is_finished = stop_triggered or is_eos_token
+      if not is_finished:
+          is_finished = generated_tokens >= self.max_generate_tokens
+          if generation_options and generation_options.max_completion_tokens:
+              is_finished = is_finished or generated_tokens >= generation_options.max_completion_tokens
+
+      # Prepare intermediate result
+      if stop_triggered:
+          intermediate_result = pre_stop_tokens[-1:] if generation_options.include_stop else []
       else:
-        generated_tokens = len(self.buffered_token_output[request_id][0])
-        is_finished = generated_tokens >= self.max_generate_tokens
+          intermediate_result = [token.item()]
 
-        if generation_options is not None and generation_options.max_completion_tokens is not None:
-          is_finished = is_finished or generated_tokens >= generation_options.max_completion_tokens
-
-      intermediate_result = [token.item()]
       self.trigger_on_token_callbacks(request_id, intermediate_result, is_finished)
       asyncio.create_task(self.broadcast_result(request_id, intermediate_result, is_finished))
 
