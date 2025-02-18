@@ -16,7 +16,8 @@ from .losses import length_masked_ce_loss
 from collections import OrderedDict
 import asyncio
 from typing import Optional
-Tensor.no_grad = True 
+import functools
+Tensor.no_grad = True
 # default settings
 TEMPERATURE = int(os.getenv("TEMPERATURE", 0.85))
 TOP_K = 25
@@ -85,26 +86,29 @@ class TinygradDynamicShardInferenceEngine(InferenceEngine):
       return sample_logits(Tensor(logits).flatten(), temp, 0, 0.8, top_p, 0.0).realize().numpy().astype(int)
     return await asyncio.get_running_loop().run_in_executor(self.executor, sample_wrapper)
 
-  async def encode(self, shard: Shard, prompt: str) -> np.ndarray:
+  async def encode(self, shard: Shard, prompt: str, **kwargs) -> np.ndarray:
     await self.ensure_shard(shard)
-    tokens = await asyncio.get_running_loop().run_in_executor(self.executor, self.tokenizer.encode, prompt)
+    tokens = await asyncio.get_running_loop().run_in_executor(
+      self.executor, 
+      functools.partial(self.tokenizer.encode, prompt, **kwargs)
+    )
     return await asyncio.get_running_loop().run_in_executor(self.executor, np.array, tokens)
-  
+
   async def decode(self, shard: Shard, tokens) -> str:
     await self.ensure_shard(shard)
     tokens = await asyncio.get_running_loop().run_in_executor(self.executor, self.tokenizer.decode, tokens)
     return tokens
-  
+
   async def load_checkpoint(self, shard: Shard, path: str):
     await self.ensure_shard(shard)
     state_dict = safe_load(path)
     await asyncio.get_running_loop().run_in_executor(self.executor, load_state_dict, self.model, state_dict)
-  
+
   async def save_checkpoint(self, shard: Shard, path: str):
     await self.ensure_shard(shard)
     state_dict = await asyncio.get_running_loop().run_in_executor(self.executor, get_state_dict, self.model)
-    safe_save(state_dict, path) 
-  
+    safe_save(state_dict, path)
+
   async def infer_tensor(self, request_id: str, shard: Shard, input_data: np.ndarray, inference_state: Optional[dict] = None) -> tuple[np.ndarray, Optional[dict]]:
     await self.ensure_shard(shard)
     def wrap_infer():
@@ -125,7 +129,7 @@ class TinygradDynamicShardInferenceEngine(InferenceEngine):
     score = await asyncio.get_running_loop().run_in_executor(self.executor, lambda: self.session['jit'](Tensor(inputs), targets, lengths))
     out = score.numpy()
     return out
-  
+
   async def train(self, request_id: str, shard: Shard, inputs, targets, lengths, loss=length_masked_ce_loss, opt=nn.optim.Adam, lr=1e-5):
     def step(x, y, l):
       Tensor.training = True
@@ -135,9 +139,9 @@ class TinygradDynamicShardInferenceEngine(InferenceEngine):
       self.session['opt'].step()
       return score
     await self.ensure_shard(shard)
-      
+
     score = await asyncio.get_running_loop().run_in_executor(self.executor, lambda: self.session['jit'](Tensor(inputs), targets, lengths).realize())
-    
+
     return loss.numpy(), loss.numpy()
 
   async def ensure_shard(self, shard: Shard):
