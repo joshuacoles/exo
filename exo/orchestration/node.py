@@ -161,28 +161,34 @@ class Node:
       # Check for stop sequences
       stop_sequence_found = False
       if generation_options and generation_options.stop:
-        current_text = self.decodable_buffer[request_id] + decoded_token
+        # Merge new token with buffer and maintain sliding window
+        self.decodable_buffer[request_id] += decoded_token
+        current_text = self.decodable_buffer[request_id]
+        
+        # Keep buffer size to 2x max stop length to catch cross-token sequences
         max_stop_len = max(len(seq) for seq in generation_options.stop)
-        stop_sequences = sorted(generation_options.stop, key=lambda x: -len(x))
+        if len(current_text) > max_stop_len * 2:
+          # Trim from beginning but leave enough for potential overlaps
+          keep_from = len(current_text) - (max_stop_len * 2)
+          self.decodable_buffer[request_id] = current_text[keep_from:]
+          current_text = self.decodable_buffer[request_id]
 
-        # Split text into emit-now vs keep-for-checking portions
-        if len(current_text) > max_stop_len:
-          emit_now = current_text[:-max_stop_len]
-          checking_buffer = current_text[-max_stop_len:]
-        else:
-          emit_now = ""
-          checking_buffer = current_text
+        # Calculate safe text to emit (everything except last max_stop_len*2 chars)
+        split_point = max(0, len(current_text) - (max_stop_len * 2))
+        emit_now = current_text[:split_point]
+        checking_buffer = current_text[split_point:]
 
-        # Emit safe-to-send portion immediately
+        # Emit safe text immediately
         if emit_now:
           emit_tokens = await self.inference_engine.encode(shard, emit_now, add_special_tokens=False)
           self.buffered_token_output[request_id][0].extend(emit_tokens)
           self.decodable_buffer[request_id] = checking_buffer
+          current_text = checking_buffer  # Update current_text after emission
 
         # Check entire buffer for any stop sequence occurrence
         earliest_match = len(checking_buffer)
         matched_stop = None
-        for stop_seq in stop_sequences:
+        for stop_seq in generation_options.stop:
           pos = checking_buffer.find(stop_seq)
           if pos != -1 and pos < earliest_match:
             earliest_match = pos
