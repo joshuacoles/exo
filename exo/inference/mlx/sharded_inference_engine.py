@@ -13,6 +13,7 @@ import asyncio
 from collections import OrderedDict
 from mlx_lm.models.cache import make_prompt_cache
 from concurrent.futures import ThreadPoolExecutor
+import functools
 
 class MLXDynamicShardInferenceEngine(InferenceEngine):
   def __init__(self, shard_downloader: ShardDownloader):
@@ -50,13 +51,12 @@ class MLXDynamicShardInferenceEngine(InferenceEngine):
     await self._eval_mlx(result)
     return np.asarray(result, dtype=int)
 
-  async def encode(self, shard: Shard, prompt: str) -> np.ndarray:
+  async def encode(self, shard: Shard, prompt: str, **kwargs) -> np.ndarray:
     await self.ensure_shard(shard)
     return np.asarray(
       await asyncio.get_running_loop().run_in_executor(
         self._tokenizer_thread,
-        self.tokenizer.encode,
-        prompt
+        functools.partial(self.tokenizer.encode, prompt, **kwargs)
       )
     )
 
