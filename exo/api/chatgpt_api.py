@@ -49,13 +49,13 @@ class Message:
 
 class ChatCompletionRequest:
   def __init__(self, model: str, messages: List[Message], temperature: float, tools: Optional[List[Dict]] = None,
-               max_completion_tokens: Optional[int] = None, stop: Optional[List[str]] = None):
+               max_completion_tokens: Optional[int] = None, stop: Optional[Union[str, List[str]]] = None):
     self.model = model
     self.messages = messages
     self.temperature = temperature
     self.tools = tools
     self.max_completion_tokens = max_completion_tokens
-    self.stop = stop
+    self.stop = stop if isinstance(stop, list) else [stop] if isinstance(stop, str) else None
 
   def to_dict(self):
     return {"model": self.model, "messages": [message.to_dict() for message in self.messages],
