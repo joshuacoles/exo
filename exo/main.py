@@ -179,7 +179,7 @@ api = ChatGPTAPI(
   system_prompt=args.system_prompt
 )
 buffered_token_output = {}
-def update_topology_viz(req_id, tokens, __):
+def update_topology_viz(req_id, tokens, _is_finished, _finish_reason):
   if not topology_viz: return
   if not node.inference_engine.shard: return
   if node.inference_engine.shard.model_id == 'stable-diffusion-2-1-base': return
@@ -243,7 +243,7 @@ async def run_model_cli(node: Node, model_name: str, prompt: str):
     await node.process_prompt(shard, prompt, request_id=request_id)
 
     tokens = []
-    def on_token(_request_id, _tokens, _is_finished):
+    def on_token(_request_id, _tokens, _is_finished, _finish_reason):
       tokens.extend(_tokens)
       return _request_id == request_id and _is_finished
     await callback.wait(on_token, timeout=300)

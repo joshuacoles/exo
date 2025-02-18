@@ -147,12 +147,13 @@ class GRPCServer(node_service_pb2_grpc.NodeServiceServicer):
     request_id = request.request_id
     result = request.result
     is_finished = request.is_finished
+    finish_reason = request.finish_reason
     img = request.tensor
-    logger.debug(f"Received SendResult request: {request_id=} {result=} {is_finished=}")
+    logger.debug(f"Received SendResult request: {request_id=} {result=} {is_finished=} {finish_reason=}")
     result = list(result)
     if len(img.tensor_data) > 0:
       result = np.frombuffer(img.tensor_data, dtype=np.dtype(img.dtype)).reshape(img.shape)
-    self.node.on_token.trigger_all(request_id, result, is_finished)
+    self.node.on_token.trigger_all(request_id, result, is_finished, finish_reason)
     return node_service_pb2.Empty()
 
   async def SendOpaqueStatus(self, request, context):
