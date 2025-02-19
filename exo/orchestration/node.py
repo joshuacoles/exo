@@ -119,6 +119,7 @@ class Node:
   async def sample_and_emit_token(self, shard, result, request_id, generation_options):
     await self.inference_engine.ensure_shard(shard)
     token = await self.inference_engine.sample(result, temp=self.default_sample_temperature)
+    self.buffered_token_output[request_id][0].append(token.item())
 
     # Check for stop sequences
     stop_sequence_found = False
@@ -164,12 +165,11 @@ class Node:
           self.buffered_token_output[request_id][0].extend(emit_tokens)
           self.decodable_buffer[request_id] = checking_buffer
 
-    # If we have just emitted an EOS, flush the buffer and emit everything. finish_reason = "stop"
-    # If we have reached the maximum length of generation (length including the buffer), flush the buffer and emit everything. finish_reason = "length"
+    # Correct behaviour:
+    # If we have just emitted an EOS, flush the stop sequence buffer and emit everything. finish_reason = "stop"
+    # If we have reached the maximum length of generation (length including the buffer), flush the stop sequence buffer and emit everything. finish_reason = "length"
     # If we have matched a stop sequence, emit emit_tokens. finish_reason = "stop"
-
-    emit_tokens = await self.inference_engine.encode(shard, emit_now, add_special_tokens=False)
-    self.buffered_token_output[request_id][0].extend(emit_tokens)
+    # Otherwise, emit emit_tokens, keep the rest in the buffer as they may form part of a stop sequence on later generation.
 
     generated_token_count = len(self.buffered_token_output[request_id][0])
     is_eos_token = token.item() == self.inference_engine.tokenizer.eos_token_id
