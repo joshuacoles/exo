@@ -116,6 +116,93 @@ class Node:
   def get_topology_inference_engines(self) -> List[List[str]]:
     return self.topology_inference_engines_pool
 
+  async def sample_and_emit_token(self, shard, result, request_id, generation_options):
+    await self.inference_engine.ensure_shard(shard)
+    token = await self.inference_engine.sample(result, temp=self.default_sample_temperature)
+    token_int = token.item()
+
+    finish_reason = None
+    tokens_to_emit = []
+    is_eos = (token_int == self.inference_engine.tokenizer.eos_token_id)
+
+    if generation_options and generation_options.stop:
+      # Append the decoded token to the buffer to handle multi-token stop sequences.
+      decoded_token = await self.inference_engine.decode(shard, [token_int])
+      self.decodable_buffer[request_id] += decoded_token
+
+      current_text = self.decodable_buffer[request_id]
+      earliest_match = None
+      matched_stop = None
+      for stop_seq in generation_options.stop:
+        pos = current_text.find(stop_seq)
+        if pos != -1 and (earliest_match is None or pos < earliest_match):
+          earliest_match = pos
+          matched_stop = stop_seq
+
+      if matched_stop is not None:
+        # Stop sequence detected: flush buffer up to the stop sequence (include it if configured).
+        if generation_options.include_stop:
+          tokens_text = current_text[:earliest_match + len(matched_stop)]
+        else:
+          tokens_text = current_text[:earliest_match]
+
+        tokens_to_emit = await self.inference_engine.encode(shard, tokens_text, add_special_tokens=False)
+        finish_reason = "stop"
+
+        # Clear the buffer since we've flushed all tokens.
+        self.decodable_buffer[request_id] = ""
+      else:
+        # No stop sequence detected: flush a safe portion if the buffer exceeds a context window.
+        max_stop_len = max(len(seq) for seq in generation_options.stop)
+        # TODO: Can we keep less of a buffer around?
+        context_window = max_stop_len * 3  # Keep 3x the max stop length for cross-boundary detection.
+        if len(current_text) > context_window:
+          tokens_text = current_text[:-context_window]
+          tokens_to_emit = await self.inference_engine.encode(shard, tokens_text, add_special_tokens=False)
+          # Retain the last context_window characters in the buffer.
+          self.decodable_buffer[request_id] = current_text[-context_window:]
+    else:
+      # Without stop sequences, simply emit the sampled token.
+      tokens_to_emit = [token_int]
+
+    # If the sampled token is EOS, flush any remaining buffer and mark finish_reason as "stop".
+    if is_eos:
+      finish_reason = "stop"
+      if generation_options and generation_options.stop and self.decodable_buffer[request_id]:
+        remaining = await self.inference_engine.encode(shard, self.decodable_buffer[request_id],
+                                                       add_special_tokens=False)
+        tokens_to_emit.extend(remaining)
+        self.decodable_buffer[request_id] = ""
+
+    # Check if the total token count (including buffered tokens) has reached the maximum permitted.
+    total_tokens = len(self.buffered_token_output[request_id][0]) + len(tokens_to_emit)
+
+    max_tokens = self.max_generate_tokens
+    if generation_options and generation_options.max_completion_tokens and generation_options.max_completion_tokens < max_tokens:
+      max_tokens = generation_options.max_completion_tokens
+
+    if finish_reason is None and total_tokens >= max_tokens and self.decodable_buffer[request_id]:
+      remaining = await self.inference_engine.encode(shard, self.decodable_buffer[request_id],
+                                                     add_special_tokens=False)
+      tokens_to_emit.extend(remaining)
+      self.decodable_buffer[request_id] = ""
+
+    # TODO: Does this handle length determinations right?
+    # Append the newly emitted tokens to the output buffer.
+    self.buffered_token_output[request_id][0].extend(tokens_to_emit)
+
+    is_finished = finish_reason is not None
+    self.trigger_on_token_callbacks(request_id, tokens_to_emit, is_finished, finish_reason)
+    asyncio.create_task(self.broadcast_result(request_id, tokens_to_emit, is_finished, finish_reason))
+
+    if is_finished:
+      self.outstanding_requests.pop(request_id, None)
+    else:
+      self.outstanding_requests[request_id] = "waiting"
+      result = token.reshape(1, -1)
+
+    return result, is_finished
+
   async def process_inference_result(
     self,
     shard,
@@ -154,98 +241,11 @@ class Node:
       raise Exception("We should never get to this state already finished")
 
     if shard.is_last_layer():
-      await self.inference_engine.ensure_shard(shard)
-      token = await self.inference_engine.sample(result, temp=self.default_sample_temperature)
-      decoded_token = await self.inference_engine.decode(shard, [token.item()])
-
-      # Check for stop sequences
-      stop_sequence_found = False
-      if generation_options and generation_options.stop:
-        # Add new token to buffer and maintain context window
-        self.decodable_buffer[request_id] += decoded_token
-        current_text = self.decodable_buffer[request_id]
-        
-        max_stop_len = max(len(seq) for seq in generation_options.stop) if generation_options.stop else 0
-        context_window = max_stop_len * 3  # Keep 3x max length for cross-boundary detection
-
-        # Trim buffer while maintaining context window
-        if len(current_text) > context_window:
-          keep_from = len(current_text) - context_window
-          self.decodable_buffer[request_id] = current_text[keep_from:]
-          current_text = self.decodable_buffer[request_id]
-
-        # First check entire buffer for stop sequences
-        earliest_match = len(current_text)
-        matched_stop = None
-        for stop_seq in generation_options.stop:
-          pos = current_text.find(stop_seq)
-          if pos != -1 and pos < earliest_match:
-            earliest_match = pos
-            matched_stop = stop_seq
-
-        if matched_stop:
-          # Handle full sequence match
-          stop_sequence_found = True
-          pre_stop_text = current_text[:earliest_match]
-          post_stop_text = current_text[earliest_match+len(matched_stop):]
-          
-          if generation_options.include_stop:
-            full_emit = pre_stop_text + matched_stop
-          else:
-            full_emit = pre_stop_text
-
-          # Encode and emit the safe portion
-          emit_tokens = await self.inference_engine.encode(shard, full_emit, add_special_tokens=False)
-          self.buffered_token_output[request_id][0].extend(emit_tokens)
-          self.decodable_buffer[request_id] = post_stop_text
-          finish_reason = "stop"
-        else:
-          # No match found - emit safe prefix while maintaining detection window
-          split_point = max(0, len(current_text) - max_stop_len)
-          emit_now = current_text[:split_point]
-          checking_buffer = current_text[split_point:]
-
-          if emit_now:
-            emit_tokens = await self.inference_engine.encode(shard, emit_now, add_special_tokens=False)
-            self.buffered_token_output[request_id][0].extend(emit_tokens)
-            self.decodable_buffer[request_id] = checking_buffer
-
-      # Handle non-stop case
-      if not stop_sequence_found:
-        self.buffered_token_output[request_id][0].append(token.item())
-
-      is_eos_token = token.item() == self.inference_engine.tokenizer.eos_token_id
-      generated_tokens = len(self.buffered_token_output[request_id][0])
-
-      finish_reason = None
-
-      if is_eos_token:
-        finish_reason = "stop"
-      elif stop_sequence_found:
-        finish_reason = "stop"
-      elif generated_tokens >= self.max_generate_tokens:
-        finish_reason = "length"
-      elif generation_options and generation_options.max_completion_tokens and generated_tokens >= generation_options.max_completion_tokens:
-        finish_reason = "length"
-
-      # Prepare intermediate result
-      if stop_sequence_found:
-        intermediate_result = emit_tokens
-      else:
-        intermediate_result = [token.item()]
-
-      is_finished = finish_reason is not None
-      self.trigger_on_token_callbacks(request_id, intermediate_result, is_finished, finish_reason)
-      asyncio.create_task(self.broadcast_result(request_id, intermediate_result, is_finished, finish_reason))
-
-      if is_finished:
-        self.outstanding_requests.pop(request_id)
-      else:
-        self.outstanding_requests[request_id] = "waiting"
-        result = token.reshape(1, -1)
+      result, is_finished = await self.sample_and_emit_token(shard, result, request_id, generation_options)
     else:
       self.outstanding_requests[request_id] = "waiting"
 
+    # Step 5. Forward the token to the next shard for continuing generation if we didn't finish
     # Forward the result on if there are further layers, or if we are the last layer but not generating
     if (shard.is_last_layer() and not is_finished) or not shard.is_last_layer():
       asyncio.create_task(self.forward_tensor(
@@ -699,11 +699,14 @@ class Node:
   def on_opaque_status(self) -> AsyncCallbackSystem[str, Tuple[str, str]]:
     return self._on_opaque_status
 
-  def trigger_on_token_callbacks(self, request_id: str, tokens: List[int], is_finished: bool, finish_reason: Optional[str] = None) -> None:
-    if DEBUG >= 2: print(f"Triggering all on_token callbacks with {request_id=} {tokens=} {is_finished=} {finish_reason=}")
+  def trigger_on_token_callbacks(self, request_id: str, tokens: List[int], is_finished: bool,
+                                 finish_reason: Optional[str] = None) -> None:
+    if DEBUG >= 2: print(
+      f"Triggering all on_token callbacks with {request_id=} {tokens=} {is_finished=} {finish_reason=}")
     self.on_token.trigger_all(request_id, tokens, is_finished, finish_reason)
 
-  async def broadcast_result(self, request_id: str, result: List[int], is_finished: bool, finish_reason: Optional[str] = None) -> None:
+  async def broadcast_result(self, request_id: str, result: List[int], is_finished: bool,
+                             finish_reason: Optional[str] = None) -> None:
     if DEBUG >= 2: print(f"Broadcasting result: {request_id=} {result=} {is_finished=} {finish_reason=}")
 
     async def send_result_to_peer(peer):
