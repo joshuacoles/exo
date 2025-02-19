@@ -154,6 +154,7 @@ class Node:
       else:
         # No stop sequence detected: flush a safe portion if the buffer exceeds a context window.
         max_stop_len = max(len(seq) for seq in generation_options.stop)
+        # TODO: Can we keep less of a buffer around?
         context_window = max_stop_len * 3  # Keep 3x the max stop length for cross-boundary detection.
         if len(current_text) > context_window:
           tokens_text = current_text[:-context_window]
@@ -175,18 +176,18 @@ class Node:
 
     # Check if the total token count (including buffered tokens) has reached the maximum permitted.
     total_tokens = len(self.buffered_token_output[request_id][0]) + len(tokens_to_emit)
-    max_tokens = min(
-        generation_options.max_completion_tokens if generation_options and generation_options.max_completion_tokens is not None else float('inf'),
-        self.max_generate_tokens
-    )
 
-    if finish_reason is None and total_tokens >= max_tokens:
-      if generation_options and generation_options.stop and self.decodable_buffer[request_id]:
-        remaining = await self.inference_engine.encode(shard, self.decodable_buffer[request_id],
-                                                       add_special_tokens=False)
-        tokens_to_emit.extend(remaining)
-        self.decodable_buffer[request_id] = ""
+    max_tokens = self.max_generate_tokens
+    if generation_options and generation_options.max_completion_tokens and generation_options.max_completion_tokens < max_tokens:
+      max_tokens = generation_options.max_completion_tokens
 
+    if finish_reason is None and total_tokens >= max_tokens and self.decodable_buffer[request_id]:
+      remaining = await self.inference_engine.encode(shard, self.decodable_buffer[request_id],
+                                                     add_special_tokens=False)
+      tokens_to_emit.extend(remaining)
+      self.decodable_buffer[request_id] = ""
+
+    # TODO: Does this handle length determinations right?
     # Append the newly emitted tokens to the output buffer.
     self.buffered_token_output[request_id][0].extend(tokens_to_emit)
 
