@@ -161,59 +161,58 @@ class Node:
       # Check for stop sequences
       stop_sequence_found = False
       if generation_options and generation_options.stop:
-        # Merge new token with buffer and maintain sliding window
+        # Add new token to buffer and maintain context window
         self.decodable_buffer[request_id] += decoded_token
         current_text = self.decodable_buffer[request_id]
         
-        # Keep buffer size to 2x max stop length to catch cross-token sequences
-        max_stop_len = max(len(seq) for seq in generation_options.stop)
-        if len(current_text) > max_stop_len * 2:
-          # Trim from beginning but leave enough for potential overlaps
-          keep_from = len(current_text) - (max_stop_len * 2)
+        max_stop_len = max(len(seq) for seq in generation_options.stop) if generation_options.stop else 0
+        context_window = max_stop_len * 3  # Keep 3x max length for cross-boundary detection
+
+        # Trim buffer while maintaining context window
+        if len(current_text) > context_window:
+          keep_from = len(current_text) - context_window
           self.decodable_buffer[request_id] = current_text[keep_from:]
           current_text = self.decodable_buffer[request_id]
 
-        # Calculate safe text to emit (everything except last max_stop_len*2 chars)
-        split_point = max(0, len(current_text) - (max_stop_len * 2))
-        emit_now = current_text[:split_point]
-        checking_buffer = current_text[split_point:]
-
-        # Emit safe text immediately
-        if emit_now:
-          emit_tokens = await self.inference_engine.encode(shard, emit_now, add_special_tokens=False)
-          self.buffered_token_output[request_id][0].extend(emit_tokens)
-          self.decodable_buffer[request_id] = checking_buffer
-          current_text = checking_buffer  # Update current_text after emission
-
-        # Check entire buffer for any stop sequence occurrence
-        earliest_match = len(checking_buffer)
+        # First check entire buffer for stop sequences
+        earliest_match = len(current_text)
         matched_stop = None
         for stop_seq in generation_options.stop:
-          pos = checking_buffer.find(stop_seq)
+          pos = current_text.find(stop_seq)
           if pos != -1 and pos < earliest_match:
             earliest_match = pos
             matched_stop = stop_seq
 
         if matched_stop:
+          # Handle full sequence match
           stop_sequence_found = True
-          pre_stop_text = checking_buffer[:earliest_match]
-          full_emit = emit_now + pre_stop_text
+          pre_stop_text = current_text[:earliest_match]
+          post_stop_text = current_text[earliest_match+len(matched_stop):]
+          
           if generation_options.include_stop:
-            full_emit += matched_stop
-            remaining_text = checking_buffer[earliest_match+len(matched_stop):]
+            full_emit = pre_stop_text + matched_stop
           else:
-            remaining_text = checking_buffer[earliest_match+len(matched_stop):]
+            full_emit = pre_stop_text
 
-          pre_stop_tokens = await self.inference_engine.encode(shard, full_emit, add_special_tokens=False)
-          self.decodable_buffer[request_id] = remaining_text
+          # Encode and emit the safe portion
+          emit_tokens = await self.inference_engine.encode(shard, full_emit, add_special_tokens=False)
+          self.buffered_token_output[request_id][0].extend(emit_tokens)
+          self.decodable_buffer[request_id] = post_stop_text
           finish_reason = "stop"
         else:
-          self.decodable_buffer[request_id] = checking_buffer
+          # No match found - emit safe prefix while maintaining detection window
+          split_point = max(0, len(current_text) - max_stop_len)
+          emit_now = current_text[:split_point]
+          checking_buffer = current_text[split_point:]
 
-      # Handle non-stop-sequence case
+          if emit_now:
+            emit_tokens = await self.inference_engine.encode(shard, emit_now, add_special_tokens=False)
+            self.buffered_token_output[request_id][0].extend(emit_tokens)
+            self.decodable_buffer[request_id] = checking_buffer
+
+      # Handle non-stop case
       if not stop_sequence_found:
         self.buffered_token_output[request_id][0].append(token.item())
-        self.decodable_buffer[request_id] += decoded_token
 
       is_eos_token = token.item() == self.inference_engine.tokenizer.eos_token_id
       generated_tokens = len(self.buffered_token_output[request_id][0])
@@ -231,8 +230,7 @@ class Node:
 
       # Prepare intermediate result
       if stop_sequence_found:
-        # `stop_sequence_found` is set to True just after `pre_stop_tokens` is defined so this will always be valid.
-        intermediate_result = pre_stop_tokens
+        intermediate_result = emit_tokens
       else:
         intermediate_result = [token.item()]
 
