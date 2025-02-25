@@ -1,3 +1,4 @@
+import re
 import uuid
 import time
 import asyncio
@@ -94,7 +95,7 @@ class JsonSchemaResponseFormat(BaseModel):
 class ChatCompletionRequest:
   def __init__(self, model: str, messages: List[Message], temperature: float, tools: Optional[List[Dict]] = None,
                max_completion_tokens: Optional[int] = None, stop: Optional[Union[str, List[str]]] = None,
-               response_format: Optional[ResponseFormat] = None):
+               response_format: Optional[ResponseFormat] = None, tool_choice: Optional[Union[str, Dict]] = None):
     self.model = model
     self.messages = messages
     self.temperature = temperature
@@ -102,19 +103,45 @@ class ChatCompletionRequest:
     self.max_completion_tokens = max_completion_tokens
     self.stop = stop if isinstance(stop, list) else [stop] if isinstance(stop, str) else None
     self.response_format = response_format
+    self.tool_choice = tool_choice
 
   def to_dict(self):
     return {"model": self.model, "messages": [message.to_dict() for message in self.messages],
             "temperature": self.temperature, "tools": self.tools, "max_completion_tokens": self.max_completion_tokens,
-            "stop": self.stop, "response_format": self.response_format}
+            "stop": self.stop, "response_format": self.response_format, "tool_choice": self.tool_choice}
 
   def to_generation_options(self) -> GenerationOptions:
+    # Determine grammar - either from response_format or function calling format
+    grammar = None
+    if self.response_format:
+      grammar = self.response_format.to_grammar()
+
     return GenerationOptions(
       max_completion_tokens=self.max_completion_tokens,
       stop=self.stop,
-      grammar_definition=self.response_format.to_grammar() if self.response_format else None,
+      grammar_definition=grammar,
       temperature=self.temperature,
+      tools=self.tools,
+      tool_choice=self.tool_choice if isinstance(self.tool_choice, dict) else {"type": self.tool_choice} if self.tool_choice else None,
     )
+
+
+def try_parse_tool_calls(content: str):
+  """Try parse the tool calls."""
+  tool_calls = []
+  offset = 0
+  for i, m in enumerate(re.finditer(r"<tool_call>\n(.+)?\n</tool_call>", content)):
+    if i == 0:
+      offset = m.start()
+    try:
+      func = json.loads(m.group(1))
+      tool_calls.append({"type": "function", "function": func})
+      if isinstance(func["arguments"], str):
+        func["arguments"] = json.loads(func["arguments"])
+    except json.JSONDecodeError as e:
+      print(f"Failed to parse tool calls: the content is {m.group(1)} and {e}")
+      pass
+  return tool_calls, offset
 
 
 def generate_completion(
@@ -124,7 +151,7 @@ def generate_completion(
   request_id: str,
   tokens: List[int],
   stream: bool,
-  finish_reason: Union[Literal["length", "stop"], None],
+  finish_reason: Union[Literal["length", "stop", "tool_calls"], None],
   object_type: Literal["chat.completion", "text_completion"],
 ) -> dict:
   decoded_tokens = tokenizer.decode(tokens)
@@ -149,11 +176,34 @@ def generate_completion(
     }
 
   choice = completion["choices"][0]
+
+  # Check if the content contains tool calls
+  tool_calls, offset = try_parse_tool_calls(decoded_tokens)
+
   if object_type.startswith("chat.completion"):
-    if stream:
-      choice["delta"] = {"role": "assistant", "content": decoded_tokens} if len(decoded_tokens) > 0 else {}
+    if tool_calls:
+      # If tool calls were detected, extract the content part before the tool calls
+      if offset > 0 and decoded_tokens[:offset].strip():
+        content = decoded_tokens[:offset].strip()
+      else:
+        content = ""
+
+      if stream:
+        choice["delta"] = {"role": "assistant", "content": content} if content else {}
+        # For streaming, tool calls will be added in subsequent chunks
+        if tool_calls and finish_reason == "tool_calls":
+          choice["delta"]["tool_calls"] = tool_calls
+      else:
+        choice["message"] = {"role": "assistant", "content": content}
+        if tool_calls:
+          choice["message"]["tool_calls"] = tool_calls
+          choice["finish_reason"] = "tool_calls"
     else:
-      choice["message"] = {"role": "assistant", "content": decoded_tokens}
+      # Regular text response
+      if stream:
+        choice["delta"] = {"role": "assistant", "content": decoded_tokens} if len(decoded_tokens) > 0 else {}
+      else:
+        choice["message"] = {"role": "assistant", "content": decoded_tokens}
   elif object_type == "text_completion":
     choice["text"] = decoded_tokens
   else:
@@ -249,6 +299,9 @@ def parse_chat_request(data: dict, default_model: str):
     else:
       raise ValueError(f"Invalid response_format: {rf_data}")
 
+  # Get tool_choice parameter
+  tool_choice = data.get("tool_choice", None)
+
   return ChatCompletionRequest(
     data.get("model", default_model),
     [parse_message(msg) for msg in data["messages"]],
@@ -259,6 +312,7 @@ def parse_chat_request(data: dict, default_model: str):
     data.get("max_completion_tokens", data.get("max_tokens", None)),
     data.get("stop", None),
     response_format,
+    tool_choice,
   )
 
 

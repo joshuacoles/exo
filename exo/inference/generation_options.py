@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 
 class GenerationOptions:
@@ -8,6 +8,8 @@ class GenerationOptions:
   stop: Optional[List[str]] = None
   temperature: Optional[float] = None
   grammar_definition: Optional[str] = None
+  tools: Optional[List[Dict[str, Any]]] = None
+  tool_choice: Optional[Dict[str, Any]] = None
 
   def __init__(
     self,
@@ -15,8 +17,12 @@ class GenerationOptions:
     stop: Optional[List[str]] = None,
     temperature: Optional[float] = None,
     grammar_definition: Optional[str] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_choice: Optional[Dict[str, Any]] = None,
   ):
     self.max_completion_tokens = max_completion_tokens
     self.stop = stop
     self.temperature = temperature
     self.grammar_definition = grammar_definition
+    self.tools = tools
+    self.tool_choice = tool_choice
