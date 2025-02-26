@@ -25,7 +25,7 @@ instruction prompting to use tools effectively.
 """
 
 import json
-import re
+
 import requests
 
 
@@ -40,38 +40,32 @@ def get_current_weather(location: str, unit: str = "celsius"):
   }
 
 
-def try_parse_tool_calls(content: str):
-  """
-  Try to parse tool calls from model response.
-
-  The exo API implementation expects tool calls to be formatted as:
-  <tool_call>
-  {"name": "function_name", "arguments": {...}}
-  </tool_call>
-
-  This function extracts these tool calls and formats them into the OpenAI-compatible
-  format for the client application.
-  """
-  tool_calls = []
-  offset = 0
-  for i, m in enumerate(re.finditer(r"<tool_call>\n(.+)?\n</tool_call>", content)):
-    if i == 0:
-      offset = m.start()
-    try:
-      func = json.loads(m.group(1))
-      tool_calls.append({"type": "function", "function": func})
-      if isinstance(func["arguments"], str):
-        func["arguments"] = json.loads(func["arguments"])
-    except json.JSONDecodeError as e:
-      print(f"Failed to parse tool calls: the content is {m.group(1)} and {e}")
-      pass
-  if tool_calls:
-    if offset > 0 and content[:offset].strip():
-      c = content[:offset]
-    else:
-      c = ""
-    return {"role": "assistant", "content": c, "tool_calls": tool_calls}
-  return {"role": "assistant", "content": re.sub(r"<\|im_end\|>$", "", content)}
+TOOLS = [
+  [
+    get_current_weather,
+    {
+      "type": "function",
+      "function": {
+        "name": "get_current_weather",
+        "description": "Get the current weather in a given location",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {
+              "type": "string",
+              "description": "The city and state, e.g. San Francisco, CA"
+            },
+            "unit": {
+              "type": "string",
+              "enum": ["celsius", "fahrenheit"]
+            }
+          },
+          "required": ["location"]
+        }
+      }
+    }
+  ]
+]
 
 
 def chat_completion(messages):
@@ -87,30 +81,11 @@ def chat_completion(messages):
   response = requests.post(
     "http://localhost:6300/v1/chat/completions",
     json={
-      "model": "llama-3.2-1b",  # Specify your model here
+      "model": "qwen-2.5-7b",  # Specify your model here
       "messages": messages,
-      "max_completion_tokens": 500,  # Limit generation length to prevent loops
-      "tools": [{
-        "type": "function",
-        "function": {
-          "name": "get_current_weather",
-          "description": "Get the current weather in a given location",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "location": {
-                "type": "string",
-                "description": "The city and state, e.g. San Francisco, CA"
-              },
-              "unit": {
-                "type": "string",
-                "enum": ["celsius", "fahrenheit"]
-              }
-            },
-            "required": ["location"]
-          }
-        }
-      }],
+      "max_completion_tokens": 1000,  # Limit generation length to prevent loops
+      "stop": ["<|eom_id|>"],  # Stop generation at the end of message token
+      "tools": list(map(lambda tool: tool[1], TOOLS)),
       "tool_choice": "auto"  # Let the model decide when to use tools
     }
   )
@@ -127,7 +102,7 @@ def main():
   # Get initial response
   response = chat_completion(messages)
   print(f"First response: {response}")
-  assistant_message = try_parse_tool_calls(response["choices"][0]["message"]["content"])
+  assistant_message = response["choices"][0]["message"]
   messages.append(assistant_message)
 
   # If there are tool calls, execute them and continue conversation
