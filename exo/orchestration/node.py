@@ -54,6 +54,7 @@ class BufferedOutput:
 
     # If we are generating structured responses initialize the guidance
     if grammar_definition:
+      print(f"Initializing guidance with grammar definition {grammar_definition}")
       self.initialize_guidance(grammar_definition)
 
   def initialize_guidance(self, grammar_definition: str):

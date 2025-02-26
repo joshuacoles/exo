@@ -7,6 +7,8 @@ class GenerationOptions:
   # Textual stop sequences that will halt generation when encountered
   stop: Optional[List[str]] = None
   temperature: Optional[float] = None
+
+  # Stuff to do with
   grammar_definition: Optional[str] = None
   tools: Optional[List[Dict[str, Any]]] = None
   tool_choice: Optional[Dict[str, Any]] = None
