@@ -127,9 +127,21 @@ class ChatCompletionRequest:
 
 
 def try_parse_tool_calls(content: str):
-  """Try parse the tool calls."""
+  """
+  Try to parse tool calls from model response.
+
+  Supports multiple formats:
+  1. <tool_call>...</tool_call> - The standard format
+  2. <|python_tag|>...</|eom_id|> - Format used by some LLaMA and other models
+
+  Returns:
+    tuple: (tool_calls, offset) where tool_calls is a list of parsed tool calls
+    and offset is the position where the first tool call starts
+  """
   tool_calls = []
   offset = 0
+
+  # First try the standard <tool_call> format
   for i, m in enumerate(re.finditer(r"<tool_call>\n(.+)?\n</tool_call>", content)):
     if i == 0:
       offset = m.start()
@@ -139,8 +151,28 @@ def try_parse_tool_calls(content: str):
       if isinstance(func["arguments"], str):
         func["arguments"] = json.loads(func["arguments"])
     except json.JSONDecodeError as e:
-      print(f"Failed to parse tool calls: the content is {m.group(1)} and {e}")
-      pass
+      if DEBUG >= 2: print(f"Failed to parse standard tool calls: {e}")
+
+  # If no standard tool calls found, try the <|python_tag|> format
+  if not tool_calls:
+    for i, m in enumerate(re.finditer(r"<\|python_tag\|>(.+)", content)):
+      if i == 0:
+        offset = m.start()
+      try:
+        func_data = json.loads(m.group(1))
+        # Convert from "parameters" format to "arguments" format if needed
+        if "parameters" in func_data and "arguments" not in func_data:
+          func = {
+            "name": func_data["name"],
+            "arguments": func_data["parameters"]
+          }
+        else:
+          func = func_data
+
+        tool_calls.append({"type": "function", "function": func})
+      except json.JSONDecodeError as e:
+        if DEBUG >= 2: print(f"Failed to parse python_tag tool calls: {e}")
+
   return tool_calls, offset
 
 
@@ -182,11 +214,16 @@ def generate_completion(
 
   if object_type.startswith("chat.completion"):
     if tool_calls:
+      print(f"Found tool calls {tool_calls} in message {decoded_tokens}")
       # If tool calls were detected, extract the content part before the tool calls
       if offset > 0 and decoded_tokens[:offset].strip():
         content = decoded_tokens[:offset].strip()
       else:
         content = ""
+
+      # # Clean up content by removing special tokens
+      # content = re.sub(r"<\|eom_id\|>", "", content)
+      # content = re.sub(r"<\|start_header_id\|>.*?<\|end_header_id\|>", "", content)
 
       if stream:
         choice["delta"] = {"role": "assistant", "content": content} if content else {}
@@ -199,11 +236,14 @@ def generate_completion(
           choice["message"]["tool_calls"] = tool_calls
           choice["finish_reason"] = "tool_calls"
     else:
-      # Regular text response
+      # Regular text response - clean up special tokens
+      cleaned_content = re.sub(r"<\|eom_id\|>", "", decoded_tokens)
+      cleaned_content = re.sub(r"<\|start_header_id\|>.*?<\|end_header_id\|>", "", cleaned_content)
+
       if stream:
-        choice["delta"] = {"role": "assistant", "content": decoded_tokens} if len(decoded_tokens) > 0 else {}
+        choice["delta"] = {"role": "assistant", "content": cleaned_content} if len(cleaned_content) > 0 else {}
       else:
-        choice["message"] = {"role": "assistant", "content": decoded_tokens}
+        choice["message"] = {"role": "assistant", "content": cleaned_content}
   elif object_type == "text_completion":
     choice["text"] = decoded_tokens
   else:
