@@ -82,7 +82,8 @@ class ChatCompletionRequest:
       grammar_definition=grammar,
       temperature=self.temperature,
       tools=self.tools,
-      tool_choice=self.tool_choice if isinstance(self.tool_choice, dict) else {"type": self.tool_choice} if self.tool_choice else None,
+      tool_choice=self.tool_choice if isinstance(self.tool_choice, dict) else {
+        "type": self.tool_choice} if self.tool_choice else None,
     )
 
 
@@ -136,6 +137,21 @@ def try_parse_tool_calls(content: str):
   return tool_calls, offset
 
 
+def completion_wrapper(
+  request_id: str,
+  object_type: Literal["chat.completion", "text_completion"],
+  model: str,
+  choices: List[dict[str, Any]]) -> dict:
+  return {
+    "id": f"chatcmpl-{request_id}",
+    "object": object_type,
+    "created": int(time.time()),
+    "model": model,
+    "system_fingerprint": f"exo_{VERSION}",
+    "choices": choices,
+  }
+
+
 def generate_completion(
   chat_request: ChatCompletionRequest,
   tokenizer,
@@ -147,18 +163,37 @@ def generate_completion(
   object_type: Literal["chat.completion", "text_completion"],
 ) -> dict:
   decoded_tokens = tokenizer.decode(tokens)
-  completion = {
-    "id": f"chatcmpl-{request_id}",
-    "object": object_type,
-    "created": int(time.time()),
-    "model": chat_request.model,
-    "system_fingerprint": f"exo_{VERSION}",
-    "choices": [{
+
+  if object_type.startswith("chat.completion"):
+    if stream:
+      choice = {
+        "index": 0,
+        "logprobs": None,
+        "finish_reason": finish_reason,
+        "delta": {
+          "role": "assistant", "content": decoded_tokens
+        } if len(decoded_tokens) > 0 else {}
+      }
+    else:
+      choice = {
+        "index": 0,
+        "logprobs": None,
+        "finish_reason": finish_reason,
+        "message": {
+          "role": "assistant",
+          "content": decoded_tokens,
+        }
+      }
+  else:
+    choice = {
       "index": 0,
       "logprobs": None,
       "finish_reason": finish_reason,
-    }],
-  }
+      "text": decoded_tokens
+    }
+
+
+  completion = completion_wrapper(request_id, object_type, chat_request.model, [choice])
 
   if not stream:
     completion["usage"] = {
@@ -166,48 +201,6 @@ def generate_completion(
       "completion_tokens": len(tokens),
       "total_tokens": len(tokenizer.encode(prompt)) + len(tokens),
     }
-
-  choice = completion["choices"][0]
-
-  # Check if the content contains tool calls
-  tool_calls, offset = try_parse_tool_calls(decoded_tokens)
-
-  if object_type.startswith("chat.completion"):
-    if tool_calls:
-      print(f"Found tool calls {tool_calls} in message {decoded_tokens}")
-      # If tool calls were detected, extract the content part before the tool calls
-      if offset > 0 and decoded_tokens[:offset].strip():
-        content = decoded_tokens[:offset].strip()
-      else:
-        content = ""
-
-      # # Clean up content by removing special tokens
-      # content = re.sub(r"<\|eom_id\|>", "", content)
-      # content = re.sub(r"<\|start_header_id\|>.*?<\|end_header_id\|>", "", content)
-
-      if stream:
-        choice["delta"] = {"role": "assistant", "content": content} if content else {}
-        # For streaming, tool calls will be added in subsequent chunks
-        if tool_calls and finish_reason == "tool_calls":
-          choice["delta"]["tool_calls"] = tool_calls
-      else:
-        choice["message"] = {"role": "assistant", "content": content}
-        if tool_calls:
-          choice["message"]["tool_calls"] = tool_calls
-          choice["finish_reason"] = "tool_calls"
-    else:
-      # Regular text response - clean up special tokens
-      cleaned_content = re.sub(r"<\|eom_id\|>", "", decoded_tokens)
-      cleaned_content = re.sub(r"<\|start_header_id\|>.*?<\|end_header_id\|>", "", cleaned_content)
-
-      if stream:
-        choice["delta"] = {"role": "assistant", "content": cleaned_content} if len(cleaned_content) > 0 else {}
-      else:
-        choice["message"] = {"role": "assistant", "content": cleaned_content}
-  elif object_type == "text_completion":
-    choice["text"] = decoded_tokens
-  else:
-    ValueError(f"Unsupported response type: {object_type}")
 
   return completion
 
@@ -648,7 +641,7 @@ class ChatGPTAPI:
         img = None
       await asyncio.wait_for(asyncio.shield(asyncio.create_task(
         self.node.process_prompt(shard, prompt, request_id=request_id, inference_state={"image": img}))),
-                             timeout=self.response_timeout)
+        timeout=self.response_timeout)
 
       response = web.StreamResponse(status=200, reason='OK', headers={
         'Content-Type': 'application/octet-stream',
