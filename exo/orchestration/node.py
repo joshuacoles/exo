@@ -5,6 +5,8 @@ import uuid
 import time
 import traceback
 from typing import List, Dict, Optional, Tuple, Union, Set
+
+from exo.inference.tool_calling import ToolFormat
 from exo.networking import Discovery, PeerHandle, Server
 from exo.inference.inference_engine import InferenceEngine, Shard
 from exo.topology.topology import Topology
@@ -33,8 +35,13 @@ class BufferedOutput:
   is_finished: bool = False
   finish_reason: Optional[str] = None
 
-  guidance_interpreter = None
-  active_token_mask = None
+  # Grammar for full output structural generation
+  guidance_interpreter: Union[llguidance.LLInterpreter, None] = None
+
+  # Guided generation for tool calls.
+  tool_format: Union[ToolFormat, None] = None
+  tool_mode: bool = False
+  tool_guidance_interpreter: Union[llguidance.LLInterpreter, None] = None
 
   def __init__(
     self,
@@ -68,14 +75,38 @@ class BufferedOutput:
 
     self.guidance_interpreter.start_without_prompt()
 
+  def enter_tool_mode(self):
+    self.tool_mode = True
+    self.tool_guidance_interpreter = llguidance.LLInterpreter(
+      llguidance.hf.from_tokenizer(self.tokenizer, n_vocab=self.tokenizer.vocab_size),
+      self.tool_format.tool_grammar(),
+      enable_ff_tokens=False,
+      enable_backtrack=False,
+      log_level=2
+    )
+
+    self.tool_guidance_interpreter.start_without_prompt()
+    self.tool_guidance_interpreter.commit_token(self.tool_format.start_token())
+
   def append(self, token: int):
+    # Guidance interpreter is used for whole output structural generation
     if self.guidance_interpreter:
       valid = self.guidance_interpreter.commit_token(token)
+      if not valid:
+        raise ValueError(f"Schema violation at token {token} ('{self.tokenizer.decode([token])}')")
+    elif self.tool_mode:
+      valid = self.tool_guidance_interpreter.commit_token(token)
       if not valid:
         raise ValueError(f"Schema violation at token {token} ('{self.tokenizer.decode([token])}')")
 
     self.buffer.append((token, self.tokenizer.decode([token])))
     self._token_count += 1
+
+    # If we are in tool mode and the tool guidance interpreter has a pending stop, we can finish
+    if self.tool_mode and self.tool_guidance_interpreter.has_pending_stop():
+      self.is_finished = True
+      self.finish_reason = "stop"
+      return
 
     if token == self.eos_token_id:
       self.is_finished = True
@@ -83,6 +114,8 @@ class BufferedOutput:
     elif self._token_count >= self.max_tokens:
       self.is_finished = True
       self.finish_reason = "length"
+    elif self.tool_format and token == self.tool_format.start_token():
+      self.enter_tool_mode()
     elif self.guidance_interpreter and self.guidance_interpreter.has_pending_stop():
       # TODO: We should handle the different stop reasons
       self.is_finished = True
