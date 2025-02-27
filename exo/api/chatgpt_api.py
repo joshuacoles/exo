@@ -182,6 +182,7 @@ def generate_completion(
         "message": {
           "role": "assistant",
           "content": decoded_tokens,
+          "tool_calls": chat_request.tool_calls,
         }
       }
   else:
@@ -191,7 +192,6 @@ def generate_completion(
       "finish_reason": finish_reason,
       "text": decoded_tokens
     }
-
 
   completion = completion_wrapper(request_id, object_type, chat_request.model, [choice])
 
@@ -240,11 +240,16 @@ def remap_messages(messages: List[Message]) -> List[Message]:
   return remapped_messages
 
 
-def build_prompt(tokenizer, _messages: List[Message], tools: Optional[List[Dict]] = None):
+def build_prompt(tokenizer, _messages: List[Message], tools: Optional[List[Dict]] = None,
+                 tool_choice: Optional[Union[str, dict]] = None):
   messages = remap_messages(_messages)
-  chat_template_args = {"conversation": [m.to_dict() for m in messages], "tokenize": False,
-                        "add_generation_prompt": True}
-  if tools:
+  chat_template_args = {
+    "conversation": [m.to_dict() for m in messages],
+    "tokenize": False,
+    "add_generation_prompt": True
+  }
+
+  if tools and tool_choice != "none":
     chat_template_args["tools"] = tools
 
   try:
@@ -278,14 +283,26 @@ def parse_chat_request(data: dict, default_model: str):
   # Get tool_choice parameter
   tool_choice = data.get("tool_choice", None)
 
+  model = data.get("model", default_model)
+
+  if model and model.startswith(
+    "gpt-"):  # to be compatible with ChatGPT tools, point all gpt- model requests to default model
+    model = default_model
+
+  if not model or model not in model_cards:
+    if DEBUG >= 1: print(
+      f"[ChatGPTAPI] Invalid model: {model}. Supported: {list(model_cards.keys())}. Defaulting to {default_model}")
+    model = default_model
+
+  # `max_tokens` is deprecated, but some clients may still use it, fall back to that value if max_completion_tokens is not provided.
+  max_completion_tokens = data.get("max_completion_tokens", data.get("max_tokens", None))
+
   return ChatCompletionRequest(
     data.get("model", default_model),
     [parse_message(msg) for msg in data["messages"]],
     data.get("temperature", 0.0),
     data.get("tools", None),
-    # The max_tokens field is deprecated, but some clients may still use it, fall back to that value if
-    # max_completion_tokens is not provided.
-    data.get("max_completion_tokens", data.get("max_tokens", None)),
+    max_completion_tokens,
     data.get("stop", None),
     response_format,
     tool_choice,
@@ -450,18 +467,28 @@ class ChatGPTAPI:
         print(f"Unknown progress event type: {type(progress_event)}. {progress_event}")
     return web.json_response(progress_data)
 
+  async def buffer_all_tokens(self, request_id: str) -> tuple[List[int], bool, Literal["length", "stop", "tool_calls"]]:
+    tokens = []
+    while True:
+      _tokens, is_finished, finish_reason = await asyncio.wait_for(
+        self.token_queues[request_id].get(),
+        timeout=self.response_timeout
+      )
+
+      tokens.extend(_tokens)
+      if is_finished:
+        break
+    return tokens, is_finished, finish_reason
+
+  def sse_data_chunk(self, json_data: dict):
+    return f"data: {json.dumps(json_data)}\n\n".encode()
+
   async def handle_post_chat_completions(self, request):
     data = await request.json()
     if DEBUG >= 2: print(f"[ChatGPTAPI] Handling chat completions request from {request.remote}: {data}")
     stream = data.get("stream", False)
     chat_request = parse_chat_request(data, self.default_model)
-    if chat_request.model and chat_request.model.startswith(
-      "gpt-"):  # to be compatible with ChatGPT tools, point all gpt- model requests to default model
-      chat_request.model = self.default_model
-    if not chat_request.model or chat_request.model not in model_cards:
-      if DEBUG >= 1: print(
-        f"[ChatGPTAPI] Invalid model: {chat_request.model}. Supported: {list(model_cards.keys())}. Defaulting to {self.default_model}")
-      chat_request.model = self.default_model
+
     shard = build_base_shard(chat_request.model, self.inference_engine_classname)
     if not shard:
       supported_models = [model for model, info in model_cards.items() if
@@ -479,7 +506,7 @@ class ChatGPTAPI:
     if self.system_prompt and not any(msg.role == "system" for msg in chat_request.messages):
       chat_request.messages.insert(0, Message("system", self.system_prompt))
 
-    prompt = build_prompt(tokenizer, chat_request.messages, chat_request.tools)
+    prompt = build_prompt(tokenizer, chat_request.messages, chat_request.tools, chat_request.tool_choice)
     request_id = str(uuid.uuid4())
     if self.on_chat_completion_request:
       try:
@@ -511,59 +538,110 @@ class ChatGPTAPI:
         await response.prepare(request)
 
         try:
+          stream_loc_type: Literal["content", "tool_calls"] = "content"
+          tool_call_index: int = -1
+
           # Stream tokens while waiting for inference to complete
           while True:
-            if DEBUG >= 2: print(f"[ChatGPTAPI] Waiting for token from queue: {request_id=}")
             tokens, is_finished, finish_reason = await asyncio.wait_for(
               self.token_queues[request_id].get(),
               timeout=self.response_timeout
             )
-            if DEBUG >= 2: print(
-              f"[ChatGPTAPI] Got token from queue: {request_id=} {tokens=} {is_finished=} {finish_reason=}")
 
-            eos_token_id = None
-            if not eos_token_id and hasattr(tokenizer, "eos_token_id"): eos_token_id = tokenizer.eos_token_id
-            if not eos_token_id and hasattr(tokenizer, "_tokenizer"): eos_token_id = tokenizer.special_tokens_map.get(
-              "eos_token_id")
+            if todo_is_new_tool_call(tokens):
+              tokens, tool_call_name = todo_parse_tool_call(tokens)
+              stream_loc_type = "tool_calls"
+              tool_call_index += 1
+              tool_call_id = str(uuid.uuid4())
 
+              # When starting a new tool call we emit an initial chunk with the tool call id and name that will later be updated with the arguments
+              # streamed in subsequent chunks.
+              completion = completion_wrapper(
+                request_id,
+                "chat.completion",
+                chat_request.model,
+                [{
+                  "index": tool_call_index,
+                  "logprobs": None,
+                  "finish_reason": None,
+                  "delta": {
+                    "tool_calls": [
+                      {
+                        "index": tool_call_index,
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                          "name": tool_call_name,
+                          "arguments": ""
+                        }
+                      }
+                    ]
+                  },
+                }]
+              )
+
+              await response.write(self.sse_data_chunk(completion))
+
+            # FIXME: What are our requirements for tokens, I feel we are double checking on len(tokens) here
             if len(tokens) == 0 and not is_finished:
               continue
 
-            if DEBUG >= 2: print(f"{eos_token_id=} {tokens[-1]=}")
-            if is_finished:
-              if tokens[-1] == eos_token_id:
-                # We do not return the EOS token in the response
-                tokens.pop(-1)
-
-            if DEBUG >= 2: print(f"{finish_reason=}")
+            if is_finished and len(tokens) > 0 and tokens[-1] == tokenizer.eos_token_id:
+              # We do not return the EOS token in the response
+              tokens.pop(-1)
 
             if len(tokens) > 0:
-              completion = generate_completion(
-                chat_request,
-                tokenizer,
-                prompt,
-                request_id,
-                tokens,
-                stream,
-                None,
-                "chat.completion",
-              )
+              if stream_loc_type == "content":
+                completion = completion_wrapper(
+                  request_id,
+                  "chat.completion",
+                  chat_request.model,
+                  [{
+                    "index": 0,
+                    "logprobs": None,
+                    "finish_reason": None,
+                    "delta": {
+                      "role": "assistant",
+                      "content": tokenizer.decode(tokens)
+                    }
+                  }]
+                )
+              else:
+                completion = completion_wrapper(
+                  request_id,
+                  "chat.completion",
+                  chat_request.model,
+                  [{
+                    "index": tool_call_index,
+                    "logprobs": None,
+                    "finish_reason": None,
+                    "delta": {
+                      "tool_calls": [
+                        {
+                          "index": tool_call_index,
+                          "function": {"arguments": tokenizer.decode(tokens)}
+                        }
+                      ]
+                    },
+                  }]
+                )
 
-              await response.write(f"data: {json.dumps(completion)}\n\n".encode())
+              await response.write(self.sse_data_chunk(completion))
 
             if is_finished:
-              completion = generate_completion(
-                chat_request,
-                tokenizer,
-                prompt,
+              completion = completion_wrapper(
                 request_id,
-                [],
-                stream,
-                finish_reason,
                 "chat.completion",
+                chat_request.model,
+                [{
+                  "index": 0,
+                  "logprobs": None,
+                  "finish_reason": finish_reason,
+                  "delta": {}
+                }]
               )
 
-              await response.write(f"data: {json.dumps(completion)}\n\n".encode())
+              await response.write(self.sse_data_chunk(completion))
               break
 
           # Send the DONE event when the stream is finished
@@ -590,26 +668,22 @@ class ChatGPTAPI:
             if DEBUG >= 2: print(f"[ChatGPTAPI] Cleaning up token queue: {request_id=}")
             del self.token_queues[request_id]
       else:
-        tokens = []
-        while True:
-          _tokens, is_finished, finish_reason = await asyncio.wait_for(self.token_queues[request_id].get(),
-                                                                       timeout=self.response_timeout)
-          tokens.extend(_tokens)
-          if is_finished:
-            break
+        tokens, is_finished, finish_reason = await self.buffer_all_tokens(request_id)
 
-        eos_token_id = None
-        if not eos_token_id and hasattr(tokenizer, "eos_token_id"): eos_token_id = tokenizer.eos_token_id
-        if not eos_token_id and hasattr(tokenizer, "_tokenizer"): eos_token_id = tokenizer.special_tokens_map.get(
-          "eos_token_id")
-        if DEBUG >= 2: print(f"Checking if end of tokens result {tokens[-1]=} is {eos_token_id=}")
-        if tokens[-1] == eos_token_id:
+        if tokens[-1] == tokenizer.eos_token_id:
           # We do not return the EOS token in the response
           tokens.pop(-1)
 
-        return web.json_response(
-          generate_completion(chat_request, tokenizer, prompt, request_id, tokens, stream, finish_reason,
-                              "chat.completion"))
+        return web.json_response(generate_completion(
+          chat_request,
+          tokenizer,
+          prompt,
+          request_id,
+          tokens,
+          stream,
+          finish_reason,
+          "chat.completion"
+        ))
     except asyncio.TimeoutError:
       return web.json_response({"detail": "Response generation timed out"}, status=408)
     except Exception as e:
