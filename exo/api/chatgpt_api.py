@@ -110,7 +110,7 @@ def try_parse_tool_calls(content: str) -> tuple[list[dict], int]:
     raise ValueError(f"Unknown format: {format}")
 
 
-def tool_parse_b(content):
+def tool_parse_b(content: str) -> tuple[list[dict], int]:
   offset = 0
   tool_calls = []
 
@@ -136,7 +136,7 @@ def tool_parse_b(content):
   return tool_calls, offset
 
 
-def tool_parse_a(content):
+def tool_parse_a(content: str) -> tuple[list[dict], int]:
   offset = 0
   tool_calls = []
 
@@ -174,6 +174,22 @@ def parse_new_tool_call(tokens) -> tuple[list[int], Optional[str]]:
     tuple: (tokens, tool_call_name) where tokens is a list of non-tool call tokens and tool_call_name is the name of the tool call if found, otherwise None
   """
 
+  format = "tool_call"
+
+  if format == "tool_call":
+    return parse_new_tool_call_a(tokens)
+  elif format == "python_tag":
+    return parse_new_tool_call_b(tokens)
+  else:
+    raise ValueError(f"Unknown format: {format}")
+
+
+def parse_new_tool_call_a(tokens) -> tuple[list[int], Optional[str]]:
+  """
+  Search for <tool_call>{ "name": "return_value",
+  """
+
+def parse_new_tool_call_b(tokens) -> tuple[list[int], Optional[str]]:
   return tokens, None
 
 def completion_wrapper(

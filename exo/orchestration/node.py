@@ -75,6 +75,7 @@ class BufferedOutput:
         # This will have the effect of immediately entering tool mode.
         # TODO: Is there a better way to handle this?
         # TODO: Can this be handled by FF_tokens and a whole output grammar? Do we want to merge the two?
+        # TODO: Should this be handled as a total output grammar?
         self.append(tool_parser.start_token())
 
   def initialize_guidance(self, grammar_definition: str):
@@ -194,6 +195,8 @@ class BufferedOutput:
     return self._token_count
 
   def next_tokens(self) -> List[int]:
+    # TODO: We need to buffer enough to handle tool call identification
+
     if self.is_finished:
       # Return all remaining tokens if finished
       tokens = [token for token, _ in self.buffer]
