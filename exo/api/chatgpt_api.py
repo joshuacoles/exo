@@ -87,7 +87,7 @@ class ChatCompletionRequest:
     )
 
 
-def try_parse_tool_calls(content: str):
+def try_parse_tool_calls(content: str) -> tuple[list[dict], int]:
   """
   Try to parse tool calls from model response.
 
@@ -99,10 +99,47 @@ def try_parse_tool_calls(content: str):
     tuple: (tool_calls, offset) where tool_calls is a list of parsed tool calls
     and offset is the position where the first tool call starts
   """
-  tool_calls = []
-  offset = 0
 
-  # First try the standard <tool_call> format
+  format = "tool_call"
+
+  if format == "tool_call":
+    return tool_parse_a(content)
+  elif format == "python_tag":
+    return tool_parse_b(content)
+  else:
+    raise ValueError(f"Unknown format: {format}")
+
+
+def tool_parse_b(content):
+  offset = 0
+  tool_calls = []
+
+  for i, m in enumerate(re.finditer(r"<\|python_tag\|>(.+)", content)):
+    if i == 0:
+      offset = m.start()
+
+    try:
+      func_data = json.loads(m.group(1))
+      # Convert from "parameters" format to "arguments" format if needed
+      if "parameters" in func_data and "arguments" not in func_data:
+        func = {
+          "name": func_data["name"],
+          "arguments": func_data["parameters"]
+        }
+      else:
+        func = func_data
+
+      tool_calls.append({"type": "function", "function": func})
+    except json.JSONDecodeError as e:
+      if DEBUG >= 2: print(f"Failed to parse python_tag tool calls: {e}")
+
+  return tool_calls, offset
+
+
+def tool_parse_a(content):
+  offset = 0
+  tool_calls = []
+
   for i, m in enumerate(re.finditer(r"<tool_call>\n(.+)?\n</tool_call>", content)):
     if i == 0:
       offset = m.start()
@@ -114,28 +151,30 @@ def try_parse_tool_calls(content: str):
     except json.JSONDecodeError as e:
       if DEBUG >= 2: print(f"Failed to parse standard tool calls: {e}")
 
-  # If no standard tool calls found, try the <|python_tag|> format
-  if not tool_calls:
-    for i, m in enumerate(re.finditer(r"<\|python_tag\|>(.+)", content)):
-      if i == 0:
-        offset = m.start()
-      try:
-        func_data = json.loads(m.group(1))
-        # Convert from "parameters" format to "arguments" format if needed
-        if "parameters" in func_data and "arguments" not in func_data:
-          func = {
-            "name": func_data["name"],
-            "arguments": func_data["parameters"]
-          }
-        else:
-          func = func_data
-
-        tool_calls.append({"type": "function", "function": func})
-      except json.JSONDecodeError as e:
-        if DEBUG >= 2: print(f"Failed to parse python_tag tool calls: {e}")
-
   return tool_calls, offset
 
+def parse_tool_calls_complete(tokens) -> tuple[list[int], list[dict]]:
+  """
+  Parse tool calls from the list of tokens.
+
+  Returns:
+    tuple: (tokens, tool_calls) where tokens is a list of non-tool call tokens and tool_calls is a list of tool calls
+  """
+
+  tool_calls, offset = try_parse_tool_calls(tokens)
+
+  return tokens[offset:], tool_calls
+
+
+def parse_new_tool_call(tokens) -> tuple[list[int], Optional[str]]:
+  """
+  Parse a new tool call from the list of tokens.
+
+  Returns:
+    tuple: (tokens, tool_call_name) where tokens is a list of non-tool call tokens and tool_call_name is the name of the tool call if found, otherwise None
+  """
+
+  return tokens, None
 
 def completion_wrapper(
   request_id: str,
@@ -495,8 +534,8 @@ class ChatGPTAPI:
               timeout=self.response_timeout
             )
 
-            if todo_is_new_tool_call(tokens):
-              tokens, tool_call_name = todo_parse_tool_call(tokens)
+            tokens, new_tool_call_name = parse_new_tool_call(tokens)
+            if new_tool_call_name is not None:
               stream_loc_type = "tool_calls"
               tool_call_index += 1
               tool_call_id = str(uuid.uuid4())
@@ -518,7 +557,7 @@ class ChatGPTAPI:
                         "id": tool_call_id,
                         "type": "function",
                         "function": {
-                          "name": tool_call_name,
+                          "name": new_tool_call_name,
                           "arguments": ""
                         }
                       }
@@ -621,7 +660,7 @@ class ChatGPTAPI:
           # We do not return the EOS token in the response
           tokens.pop(-1)
 
-        tokens, tool_calls = todo_parse_tool_calls(tokens)
+        tokens, tool_calls = parse_tool_calls_complete(tokens)
 
         return web.json_response(completion_wrapper(
           request_id,
