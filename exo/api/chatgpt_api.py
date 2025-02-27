@@ -152,59 +152,6 @@ def completion_wrapper(
   }
 
 
-def generate_completion(
-  chat_request: ChatCompletionRequest,
-  tokenizer,
-  prompt: str,
-  request_id: str,
-  tokens: List[int],
-  stream: bool,
-  finish_reason: Union[Literal["length", "stop", "tool_calls"], None],
-  object_type: Literal["chat.completion", "text_completion"],
-) -> dict:
-  decoded_tokens = tokenizer.decode(tokens)
-
-  if object_type.startswith("chat.completion"):
-    if stream:
-      choice = {
-        "index": 0,
-        "logprobs": None,
-        "finish_reason": finish_reason,
-        "delta": {
-          "role": "assistant", "content": decoded_tokens
-        } if len(decoded_tokens) > 0 else {}
-      }
-    else:
-      choice = {
-        "index": 0,
-        "logprobs": None,
-        "finish_reason": finish_reason,
-        "message": {
-          "role": "assistant",
-          "content": decoded_tokens,
-          "tool_calls": chat_request.tool_calls,
-        }
-      }
-  else:
-    choice = {
-      "index": 0,
-      "logprobs": None,
-      "finish_reason": finish_reason,
-      "text": decoded_tokens
-    }
-
-  completion = completion_wrapper(request_id, object_type, chat_request.model, [choice])
-
-  if not stream:
-    completion["usage"] = {
-      "prompt_tokens": len(tokenizer.encode(prompt)),
-      "completion_tokens": len(tokens),
-      "total_tokens": len(tokenizer.encode(prompt)) + len(tokens),
-    }
-
-  return completion
-
-
 def remap_messages(messages: List[Message]) -> List[Message]:
   remapped_messages = []
   last_image = None
@@ -674,15 +621,22 @@ class ChatGPTAPI:
           # We do not return the EOS token in the response
           tokens.pop(-1)
 
-        return web.json_response(generate_completion(
-          chat_request,
-          tokenizer,
-          prompt,
+        tokens, tool_calls = todo_parse_tool_calls(tokens)
+
+        return web.json_response(completion_wrapper(
           request_id,
-          tokens,
-          stream,
-          finish_reason,
-          "chat.completion"
+          "chat.completion",
+          chat_request.model,
+          [{
+            "index": 0,
+            "logprobs": None,
+            "finish_reason": finish_reason,
+            "message": {
+              "role": "assistant",
+              "content": tokenizer.decode(tokens),
+              "tool_calls": tool_calls,
+            }
+          }]
         ))
     except asyncio.TimeoutError:
       return web.json_response({"detail": "Response generation timed out"}, status=408)
