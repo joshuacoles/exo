@@ -94,11 +94,31 @@ class WrappedJsonToolParser(ToolParser):
     return self.start_token
 
   def tool_grammar(self):
-    return [
-      self.start_token,
-      json_schema_to_grammar(generate_tool_call_json_schema(self.active_tools())),
-      self.end_token,
-    ]
+    # TODO: How do we handle tokens here?
+    return f"""
+    %llguidance {{}}
+
+    start: {self.start_token} tool_call {self.end_token}
+    tool_call: %json{{{generate_tool_call_json_schema(self.active_tools())}}}
+    """
+
+class LlamaPythonTag(ToolParser):
+  def __init__(self, tools: List[ToolDefinition], tool_choice: Optional[ToolChoice], start_token: str, end_token: str):
+    super().__init__(tools, tool_choice)
+    self.start_token = start_token
+    self.end_token = end_token
+
+  def tool_grammar(self) -> str:
+    # This is lifted from https://github.com/guidance-ai/llguidance/blob/cc83715f/docs/syntax.md#special-tokens
+    return f"""
+    %llguidance {{}}
+
+    # start: TEXT | fun_call
+    # TEXT: /[^{{](.|\n)*/
+    start: fun_call
+    fun_call: <|python_tag|> json_body <|eom_id|>
+    json_body: %json{{{generate_tool_call_json_schema(self.active_tools(), "parameters")}}}
+    """
 
 
 def generate_tool_grammar(tools: List[ToolDefinition], tool_choice: Union[ToolChoice, None]) -> Union[str, None]:
@@ -126,7 +146,7 @@ def json_schema_to_grammar(json_schema: Dict[str, Any]) -> str:
   return json.dumps({"grammars": [{"json_schema": json_schema}]})
 
 
-def generate_tool_call_json_schema(tools: List[ToolDefinition]) -> Dict[str, Any]:
+def generate_tool_call_json_schema(tools: List[ToolDefinition], parameter_key: str = "arguments") -> Dict[str, Any]:
   """
   Generate a JSON schema for tool calling. For a given tool name, the schema should have the rough form of:
 
@@ -152,13 +172,14 @@ def generate_tool_call_json_schema(tools: List[ToolDefinition]) -> Dict[str, Any
     tool_schema = {
       "type": "object",
       "properties": {
+        # TODO: The LLama example on LLGuidance uses "name": { "const": "get_weather" } which might be easier?
         "name": {
           "type": "string",
           "enum": [tool.name]
         },
-        "arguments": tool.parameters
+        parameter_key: tool.parameters
       },
-      "required": ["name", "arguments"],
+      "required": ["name", parameter_key],
       "additionalProperties": False
     }
     schema_variants.append(tool_schema)
