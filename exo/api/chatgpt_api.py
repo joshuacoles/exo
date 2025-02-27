@@ -92,6 +92,26 @@ class JsonSchemaResponseFormat(BaseModel):
       "grammars": [{"json_schema": self.json_schema}]
     })
 
+# Aligns with https://github.com/guidance-ai/llgtrt
+class LarkGrammarResponseFormat(BaseModel):
+  type: Literal["lark_grammar"]
+  lark_grammar: str
+
+  def to_grammar(self) -> Optional[str]:
+    return json.dumps({
+      "grammars": [{"lark_grammar": self.lark_grammar}]
+    })
+
+
+class RegexResponseFormat(BaseModel):
+  type: Literal["regex"]
+  regex: str
+
+  def to_grammar(self) -> Optional[str]:
+    return json.dumps({
+      "grammars": [{"lark_grammar": f"start: /{self.regex}/" }]
+    })
+
 class ChatCompletionRequest:
   def __init__(self, model: str, messages: List[Message], temperature: float, tools: Optional[List[Dict]] = None,
                max_completion_tokens: Optional[int] = None, stop: Optional[Union[str, List[str]]] = None,
