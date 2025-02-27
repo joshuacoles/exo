@@ -7,7 +7,7 @@ from exo.inference.grammars import JSON_LARK_GRAMMAR
 
 
 class ResponseFormat(BaseModel):
-  type: Literal["text", "json_object", "json_schema"]
+  type: Literal["text", "json_object", "json_schema", "lark_grammar", "regex"]
 
   def to_grammar(self) -> Optional[str]:
     raise NotImplementedError()
@@ -21,7 +21,7 @@ class ResponseFormat(BaseModel):
     return True
 
   @staticmethod
-  def parse_from_request(obj: dict):
+  def parse_from_request(obj: dict) -> "ResponseFormat":
     if obj["type"] == "text":
       return TextResponseFormat.model_validate(obj)
     elif obj["type"] == "json_object":
@@ -46,7 +46,7 @@ class TextResponseFormat(ResponseFormat):
     return None
 
 
-class JsonObjectResponseFormat(BaseModel):
+class JsonObjectResponseFormat(ResponseFormat):
   type: Literal["json_object"]
 
   def to_grammar(self) -> Optional[str]:
@@ -55,7 +55,7 @@ class JsonObjectResponseFormat(BaseModel):
     })
 
 
-class JsonSchemaResponseFormat(BaseModel):
+class JsonSchemaResponseFormat(ResponseFormat):
   type: Literal["json_schema"]
   json_schema: Any
 
@@ -66,7 +66,7 @@ class JsonSchemaResponseFormat(BaseModel):
 
 
 # Aligns with https://github.com/guidance-ai/llgtrt
-class LarkGrammarResponseFormat(BaseModel):
+class LarkGrammarResponseFormat(ResponseFormat):
   type: Literal["lark_grammar"]
   lark_grammar: str
 
@@ -76,7 +76,7 @@ class LarkGrammarResponseFormat(BaseModel):
     })
 
 
-class RegexResponseFormat(BaseModel):
+class RegexResponseFormat(ResponseFormat):
   type: Literal["regex"]
   regex: str
 
