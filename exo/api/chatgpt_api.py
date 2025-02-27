@@ -87,56 +87,6 @@ class ChatCompletionRequest:
     )
 
 
-def try_parse_tool_calls(content: str):
-  """
-  Try to parse tool calls from model response.
-
-  Supports multiple formats:
-  1. <tool_call>...</tool_call> - The standard format
-  2. <|python_tag|>...</|eom_id|> - Format used by some LLaMA and other models
-
-  Returns:
-    tuple: (tool_calls, offset) where tool_calls is a list of parsed tool calls
-    and offset is the position where the first tool call starts
-  """
-  tool_calls = []
-  offset = 0
-
-  # First try the standard <tool_call> format
-  for i, m in enumerate(re.finditer(r"<tool_call>\n(.+)?\n</tool_call>", content)):
-    if i == 0:
-      offset = m.start()
-    try:
-      func = json.loads(m.group(1))
-      tool_calls.append({"type": "function", "function": func})
-      if isinstance(func["arguments"], str):
-        func["arguments"] = json.loads(func["arguments"])
-    except json.JSONDecodeError as e:
-      if DEBUG >= 2: print(f"Failed to parse standard tool calls: {e}")
-
-  # If no standard tool calls found, try the <|python_tag|> format
-  if not tool_calls:
-    for i, m in enumerate(re.finditer(r"<\|python_tag\|>(.+)", content)):
-      if i == 0:
-        offset = m.start()
-      try:
-        func_data = json.loads(m.group(1))
-        # Convert from "parameters" format to "arguments" format if needed
-        if "parameters" in func_data and "arguments" not in func_data:
-          func = {
-            "name": func_data["name"],
-            "arguments": func_data["parameters"]
-          }
-        else:
-          func = func_data
-
-        tool_calls.append({"type": "function", "function": func})
-      except json.JSONDecodeError as e:
-        if DEBUG >= 2: print(f"Failed to parse python_tag tool calls: {e}")
-
-  return tool_calls, offset
-
-
 def completion_wrapper(
   request_id: str,
   object_type: Literal["chat.completion", "text_completion"],
@@ -464,11 +414,14 @@ class ChatGPTAPI:
     if DEBUG >= 2: print(f"[ChatGPTAPI] Processing prompt: {request_id=} {shard=} {prompt=}")
 
     try:
+      generation_options = chat_request.to_generation_options()
+      api_tool_parser = generation_options.tool_parser()
+
       await asyncio.wait_for(asyncio.shield(asyncio.create_task(self.node.process_prompt(
         shard,
         prompt,
         request_id=request_id,
-        generation_options=chat_request.to_generation_options()
+        generation_options=generation_options
       ))), timeout=self.response_timeout)
 
       if DEBUG >= 2: print(f"[ChatGPTAPI] Waiting for response to finish. timeout={self.response_timeout}s")
@@ -495,8 +448,8 @@ class ChatGPTAPI:
               timeout=self.response_timeout
             )
 
-            if todo_is_new_tool_call(tokens):
-              tokens, tool_call_name = todo_parse_tool_call(tokens)
+            tokens, new_tool_call_name = api_tool_parser.parse_new_tool_call(tokens)
+            if new_tool_call_name is not None:
               stream_loc_type = "tool_calls"
               tool_call_index += 1
               tool_call_id = str(uuid.uuid4())
@@ -518,7 +471,7 @@ class ChatGPTAPI:
                         "id": tool_call_id,
                         "type": "function",
                         "function": {
-                          "name": tool_call_name,
+                          "name": new_tool_call_name,
                           "arguments": ""
                         }
                       }
@@ -621,7 +574,7 @@ class ChatGPTAPI:
           # We do not return the EOS token in the response
           tokens.pop(-1)
 
-        tokens, tool_calls = todo_parse_tool_calls(tokens)
+        tokens, tool_calls = api_tool_parser.parse_tool_calls_complete(tokens)
 
         return web.json_response(completion_wrapper(
           request_id,
