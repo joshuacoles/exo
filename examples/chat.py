@@ -127,7 +127,7 @@ def chat_completion(messages: List[Dict[str, str]], model: str = "llama-3.2-1b",
     request_data["tool_choice"] = "auto"
 
   response = requests.post(
-    "http://localhost:6300/v1/chat/completions",
+    "http://localhost:52415/v1/chat/completions",
     json=request_data,
     stream=stream
   )

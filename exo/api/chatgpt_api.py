@@ -83,8 +83,7 @@ class ChatCompletionRequest:
       grammar_definition=grammar,
       temperature=self.temperature,
       tools=self.tools,
-      tool_choice=self.tool_choice if isinstance(self.tool_choice, dict) else {
-        "type": self.tool_choice} if self.tool_choice else None,
+      tool_choice=self.tool_choice,
     )
 
 
@@ -455,38 +454,39 @@ class ChatGPTAPI:
               # We do not return the EOS token in the response
               tokens.pop(-1)
 
-            remaining_decoded_content, tool_calls = api_tool_parser.parse_tool_calls(decoded)
-            
-            if tool_calls is not None:
-              for tool_call in tool_calls:
-                stream_loc_type = "tool_calls"
-                tool_call_index += 1
-                tool_call_id = str(uuid.uuid4())
+            if api_tool_parser:
+              remaining_decoded_content, tool_calls = api_tool_parser.parse_tool_calls(decoded)
 
-                # When starting a new tool call we emit an initial chunk with the tool call id and name that will later be updated with the arguments
-                # streamed in subsequent chunks.
-                completion = completion_wrapper(
-                  request_id,
-                  "chat.completion",
-                  chat_request.model,
-                  [{
-                    "index": tool_call_index,
-                    "logprobs": None,
-                    "finish_reason": None,
-                    "delta": {
-                      "tool_calls": [
-                        {
-                          "index": tool_call_index,
-                          "id": tool_call_id,
-                          "type": "function",
-                          "function": tool_call.model_dump()
-                        }
-                      ]
-                    },
-                  }]
-                )
+              if tool_calls is not None:
+                for tool_call in tool_calls:
+                  stream_loc_type = "tool_calls"
+                  tool_call_index += 1
+                  tool_call_id = str(uuid.uuid4())
 
-                await response.write(self.sse_data_chunk(completion))
+                  # When starting a new tool call we emit an initial chunk with the tool call id and name that will later be updated with the arguments
+                  # streamed in subsequent chunks.
+                  completion = completion_wrapper(
+                    request_id,
+                    "chat.completion",
+                    chat_request.model,
+                    [{
+                      "index": tool_call_index,
+                      "logprobs": None,
+                      "finish_reason": None,
+                      "delta": {
+                        "tool_calls": [
+                          {
+                            "index": tool_call_index,
+                            "id": tool_call_id,
+                            "type": "function",
+                            "function": tool_call.model_dump()
+                          }
+                        ]
+                      },
+                    }]
+                  )
+
+                  await response.write(self.sse_data_chunk(completion))
 
             # FIXME: What are our requirements for tokens, I feel we are double checking on len(tokens) here
             if len(tokens) == 0 and not is_finished:
@@ -581,7 +581,11 @@ class ChatGPTAPI:
           tokens.pop(-1)
 
         decoded = tokenizer.decode(tokens)
-        remaining_decoded_content, tool_calls = api_tool_parser.parse_tool_calls(decoded)
+        if api_tool_parser:
+          remaining_decoded_content, tool_calls = api_tool_parser.parse_tool_calls(decoded)
+        else:
+          remaining_decoded_content = decoded
+          tool_calls = []
 
         return web.json_response(completion_wrapper(
           request_id,
@@ -598,7 +602,7 @@ class ChatGPTAPI:
                 id=str(uuid.uuid4()),
                 type="function",
                 function=tool_call,
-              ) for tool_call in tool_calls],
+              ) for tool_call in tool_calls] if api_tool_parser else None,
             }
           }]
         ))

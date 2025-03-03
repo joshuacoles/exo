@@ -100,13 +100,16 @@ class LlamaPythonTag(ToolParser):
   def __init__(self, tokenizer: Tokenizer, tools: List[ToolDefinition], tool_choice: Optional[ToolChoice]):
     super().__init__(tokenizer, tools, tool_choice)
 
+  def start_token(self):
+    return 128010
+
   def tool_grammar(self) -> str:
     # This is lifted from https://github.com/guidance-ai/llguidance/blob/cc83715f/docs/syntax.md#special-tokens
     return f"""
     %llguidance {{}}
 
     # start: TEXT | fun_call
-    # TEXT: /[^{{](.|\n)*/
+    # TEXT: /[^{{](.|\\n)*/
     start: fun_call
     fun_call: <|python_tag|> json_body <|eom_id|>
     json_body: %json{{{generate_tool_call_json_schema(self.active_tools(), "parameters")}}}

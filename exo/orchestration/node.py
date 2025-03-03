@@ -180,7 +180,7 @@ class Node:
         stop_sequences=generation_options.stop or [],
         tokenizer=self.inference_engine.tokenizer,
         grammar_definition=generation_options.grammar_definition,
-        tool_parser=generation_options.tool_parser(),
+        tool_parser=generation_options.tool_parser(self.inference_engine.tokenizer),
       )
 
     buffered_output = self.buffered_token_output[request_id]
