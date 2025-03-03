@@ -179,25 +179,16 @@ class BufferedOutput:
     return self._token_count
 
   def next_tokens(self) -> List[int]:
-    # TODO: We need to buffer enough to handle tool call identification
-
+    # Simplification: The only emission that happens in tool call mode is at this point.
+    # This does not allow for tool streaming but greatly simplifies the code involved
     if self.is_finished:
       # Return all remaining tokens if finished
       tokens = [token for token, _ in self.buffer]
       self.buffer = []
       return tokens
-    
-    if self.tool_mode:
-      # For tool mode we need to check if the tool call is ready to emit. We do not apply stop sequences in tool mode for now.
-      tool_call_ready = self.tool_parser.is_new_tool_call_ready_to_emit(self.assembled_text())
 
-      if tool_call_ready:
-        # Return all remaining tokens if we have buffered enough to identify the tool call
-        tokens = [token for token, _ in self.buffer]
-        self.buffer = []
-        return tokens
-    else:
-      # In non-tool mode we need to check if the stop sequence buffer is satisfied
+    # In non-tool mode we need to check if the stop sequence buffer is satisfied
+    if not self.tool_mode:
       stop_buffer_satisfied = len(self.assembled_text()) >= self.stop_seq_buffer_char_size
 
       # If so return the oldest token in the buffer
