@@ -1,5 +1,8 @@
+import datetime
+import json
 from typing import List, Tuple, Optional
 
+import llguidance
 from llguidance import LLInterpreter
 from llguidance.hf import from_tokenizer as llg_from_tokenizer
 import numpy as np
@@ -77,16 +80,32 @@ class BufferedOutput:
 
   def enter_tool_mode(self):
     self.tool_mode = True
+    tool_grammar = self.tool_parser.tool_grammar()
+    # Write the tool grammar to a temp file for debugging/testing
+    import os
+    import datetime
+
+    # Create a file with the tool grammar in the current directory with date in the name
+    current_date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    grammar_filename = f"tool_grammar_{current_date}.grammar"
+
+    with open(grammar_filename, 'w') as grammar_file:
+        grammar_file.write(tool_grammar)
+
+    print(f"Tool grammar written to file: {grammar_filename}")
+
+    b = llg_from_tokenizer(self.tokenizer, n_vocab=self.tokenizer.vocab_size)
     self.tool_guidance_interpreter = LLInterpreter(
-      llg_from_tokenizer(self.tokenizer, n_vocab=self.tokenizer.vocab_size),
-      self.tool_parser.tool_grammar(),
+      b,
+      json.dumps({"grammars": [{"lark_grammar": tool_grammar}]}),
       enable_ff_tokens=False,
       enable_backtrack=False,
       log_level=2
     )
 
     self.tool_guidance_interpreter.start_without_prompt()
-    self.tool_guidance_interpreter.commit_token(self.tool_parser.start_token())
+    s = self.tool_parser.start_token()
+    self.tool_guidance_interpreter.commit_token(s)
 
   def append(self, token: int):
     # Guidance interpreter is used for whole output structural generation

@@ -75,11 +75,11 @@ class WrappedJsonToolParser(ToolParser):
   def tool_grammar(self):
     # TODO: How do we handle tokens here?
     return f"""
-    %llguidance {{}}
+%llguidance {{}}
 
-    start: <tool_call> json_body </tool_call>
-    json_body: %json{{{generate_tool_call_json_schema(self.active_tools())}}}
-    """
+start: <tool_call> json_body </tool_call>
+json_body: %json{{{generate_tool_call_json_schema(self.active_tools())}}}
+""".strip()
 
   def parse_tool_calls(self, content: str) -> tuple[str, list[AssistantToolCall.AssistantTooCallInner]]:
     offset = 0
@@ -106,14 +106,12 @@ class LlamaPythonTag(ToolParser):
   def tool_grammar(self) -> str:
     # This is lifted from https://github.com/guidance-ai/llguidance/blob/cc83715f/docs/syntax.md#special-tokens
     return f"""
-    %llguidance {{}}
+%llguidance {{}}
 
-    # start: TEXT | fun_call
-    # TEXT: /[^{{](.|\\n)*/
-    start: fun_call
-    fun_call: <|python_tag|> json_body <|eom_id|>
-    json_body: %json{{{generate_tool_call_json_schema(self.active_tools(), "parameters")}}}
-    """
+start: fun_call
+fun_call: <|python_tag|> json_body <|eom_id|>
+json_body: %json{json.dumps(generate_tool_call_json_schema(self.active_tools(), "parameters"))}
+    """.strip()
 
   def parse_tool_calls(self, content: str) -> tuple[str, list[AssistantToolCall.AssistantTooCallInner]]:
     offset = 0

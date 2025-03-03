@@ -1,0 +1,17 @@
+start: fun_call
+TEXT: /[^{](.|\n)*/
+fun_call: <|python_tag|> json_body <|eom_id|>
+json_body: %json {
+  "type": "object",
+  "properties": {
+    "name": { "const": "get_weather" },
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "city": { "type": "string" }
+      },
+      "required": ["city"]
+    }
+  },
+  "required": ["name", "parameters"]
+}
