@@ -1,6 +1,7 @@
 from typing import Optional, List, Dict, Any, Union
 
-from exo.inference.tool_calling import SpecificToolChoice, ToolParser, WrappedJsonToolParser, ToolDefinition
+from exo.inference.tool_calling import ToolParser, WrappedJsonToolParser
+from exo.tools import ToolDefinition, ToolChoiceModel
 
 
 class GenerationOptions:
@@ -34,19 +35,11 @@ class GenerationOptions:
   def tool_parser(self) -> Optional[ToolParser]:
     if not self.tools:
       return None
-    
+
     # Convert the tools list to ToolDefinition objects
-    # TODO: is this correct?
-    tool_definitions = [ToolDefinition(**tool) for tool in self.tools]
-    if isinstance(self.tool_choice, str):
-      tool_choice = self.tool_choice
-    elif isinstance(self.tool_choice, dict):
-      # TODO: is this correct?
-      tool_choice = SpecificToolChoice(**self.tool_choice)
-    else:
-      raise ValueError(f"Invalid tool_choice: {self.tool_choice}")
-      
-    
+    tool_definitions = [ToolDefinition.model_validate(tool) for tool in self.tools]
+    tool_choice = ToolChoiceModel.validate_python(self.tool_choice) if self.tool_choice is not None else None
+
     # Use WrappedJsonToolFormat as the format class
     # We need to provide start and end tokens for the format
     return WrappedJsonToolParser(
@@ -55,4 +48,3 @@ class GenerationOptions:
       start_token="<tool_call>",
       end_token="</tool_call>"
     )
-    
