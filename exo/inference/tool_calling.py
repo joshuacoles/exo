@@ -1,14 +1,25 @@
 from typing import Dict, Any, Union, List, Optional
 import json
 import re
-
 from exo import DEBUG
-from exo.tools import ToolDefinition, SpecificToolChoice, ToolChoice
+from exo.tools import ToolDefinition, SpecificToolChoice, ToolChoice, AssistantTooCall
+from typing import Protocol
+
+
+class Tokenizer(Protocol):
+  def encode(self, text: str) -> List[int]:
+    ...
+
+  def decode(self, tokens: List[int]) -> str:
+    ...
 
 
 class ToolParser:
-  def __init__(self, tools: List[ToolDefinition], tool_choice: Optional[ToolChoice]):
+  tokenizer: Tokenizer
+
+  def __init__(self, tokenizer: Tokenizer, tools: List[ToolDefinition], tool_choice: Optional[ToolChoice]):
     self.tools = tools
+    self.tokenizer = tokenizer
     if tool_choice is not None:
       self.tool_choice = tool_choice
     else:
@@ -45,29 +56,41 @@ class ToolParser:
     """
     raise NotImplementedError()
 
-  def parse_tool_calls_complete(self, tokens: str) -> Optional[list[dict]]:
+  def parse_tool_calls_complete(self, content: str) -> Optional[list[dict]]:
     raise NotImplementedError()
 
-  def parse_new_tool_call(self, tokens: list[int]) -> tuple[list[int], Optional[str]]:
+  def is_new_tool_call_ready_to_emit(self, buffered_content: str) -> bool:
+    """
+    This should emit if the prefix matches
+    """
     raise NotImplementedError()
+
+  def parse_new_tool_call_emission(self, content: str) -> AssistantTooCall.AssistantTooCallInner:
+    raise NotImplementedError()
+
+  def parse_new_tool_call(self, tokens: list[int]) -> Optional[AssistantTooCall.AssistantTooCallInner]:
+    content = self.tokenizer.decode(tokens)
+
+    if self.is_new_tool_call_ready_to_emit(content):
+      return self.parse_new_tool_call_emission(content)
+    else:
+      return None
 
 
 class WrappedJsonToolParser(ToolParser):
-  def __init__(self, tools: List[ToolDefinition], tool_choice: Optional[ToolChoice], start_token: str, end_token: str):
-    super().__init__(tools, tool_choice)
-    self.start_token = start_token
-    self.end_token = end_token
+  def __init__(self, tokenizer: Tokenizer, tools: List[ToolDefinition], tool_choice: Optional[ToolChoice]):
+    super().__init__(tokenizer, tools, tool_choice)
 
   def start_token(self):
-    return self.start_token
+    return self.tokenizer.encode("<tool_call>")[0]
 
   def tool_grammar(self):
     # TODO: How do we handle tokens here?
     return f"""
     %llguidance {{}}
 
-    start: {self.start_token} tool_call {self.end_token}
-    tool_call: %json{{{generate_tool_call_json_schema(self.active_tools())}}}
+    start: "<tool_call>" json_body "</tool_call>"
+    json_body: %json{{{generate_tool_call_json_schema(self.active_tools())}}}
     """
 
   def parse_tool_calls_complete(self, tokens: list[int]) -> tuple[list[int], list[dict]]:
@@ -86,6 +109,36 @@ class WrappedJsonToolParser(ToolParser):
         if DEBUG >= 2: print(f"Failed to parse standard tool calls: {e}")
 
     return tokens[:offset], tool_calls
+
+  def is_new_tool_call_ready_to_emit(self, content: str) -> bool:
+    # TODO: Move to just emitting a tool call entirely in one chunk, incrementally streaming the JSON is a PITA for now and requires incremental parsing. Keep the logic in the API for it though.
+    """
+    Check if the content contains a complete tool call that is ready to be emitted.
+    
+    A tool call is ready to emit when it contains enough information to be processed,
+    even if the JSON is not fully complete. We need to check for the presence of
+    essential fields using string matching since standard JSON parsing may fail
+    on incomplete JSON.
+    
+    At this stage, we only need to verify the name property is present and valid,
+    without considering the arguments.
+    """
+    # Check if content starts with the start token
+    if not content.startswith("<tool_call>"):
+      return False
+      
+    # Strip the start token to get just the JSON-like content
+    json_content = content[len("<tool_call>"):].strip()
+    
+    # Check if we have enough content to process
+    if not json_content:
+      return False
+  
+    # Check if the content contains the essential "name" field
+    return bool(re.search(r'"name"\s*:\s*"([^"]+)"', json_content))
+
+  def parse_new_tool_call_emission(self, content: str) -> AssistantTooCall.AssistantTooCallInner:
+    return json.loads(content[len(self._start_token):])
 
 
 class LlamaPythonTag(ToolParser):
@@ -106,7 +159,7 @@ class LlamaPythonTag(ToolParser):
     json_body: %json{{{generate_tool_call_json_schema(self.active_tools(), "parameters")}}}
     """
 
-  def parse_tool_calls_complete(self, tokens: list[int]) -> tuple[list[int], list[dict]]:
+  def parse_tool_calls_complete(self, content: str) -> tuple[list[int], list[dict]]:
     offset = 0
     tool_calls = []
 

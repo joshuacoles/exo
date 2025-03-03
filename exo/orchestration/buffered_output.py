@@ -11,7 +11,7 @@ class BufferedOutput:
   stop_sequences: List[str]
   max_tokens: int
   eos_token_id: int
-  buffer_char_size: int
+  stop_seq_buffer_char_size: int
 
   _token_count: int = 0
   buffer: List[Tuple[int, str]]
@@ -37,7 +37,7 @@ class BufferedOutput:
     tool_parser: Optional[ToolParser] = None,
   ):
     self.buffer = []
-    self.buffer_char_size = max(len(stop_sequence) for stop_sequence in stop_sequences) if len(
+    self.stop_seq_buffer_char_size = max(len(stop_sequence) for stop_sequence in stop_sequences) if len(
       stop_sequences) > 0 else 0
     self.max_tokens = max_tokens
     self.eos_token_id = eos_token_id
@@ -186,9 +186,24 @@ class BufferedOutput:
       tokens = [token for token, _ in self.buffer]
       self.buffer = []
       return tokens
-    elif len(self.assembled_text()) >= self.buffer_char_size:
-      token, _ = self.buffer.pop(0)
-      return [token]
+    
+    if self.tool_mode:
+      # For tool mode we need to check if the tool call is ready to emit. We do not apply stop sequences in tool mode for now.
+      tool_call_ready = self.tool_parser.is_new_tool_call_ready_to_emit(self.assembled_text())
+
+      if tool_call_ready:
+        # Return all remaining tokens if we have buffered enough to identify the tool call
+        tokens = [token for token, _ in self.buffer]
+        self.buffer = []
+        return tokens
+    else:
+      # In non-tool mode we need to check if the stop sequence buffer is satisfied
+      stop_buffer_satisfied = len(self.assembled_text()) >= self.stop_seq_buffer_char_size
+
+      # If so return the oldest token in the buffer
+      if stop_buffer_satisfied:
+        token, _ = self.buffer.pop(0)
+        return [token]
 
     # Not enough tokens yet
     return []
