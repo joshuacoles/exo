@@ -2,6 +2,12 @@ from typing import Dict, Any, Literal, Union
 
 from pydantic import BaseModel, TypeAdapter
 
+class WrappedToolDefinition(BaseModel):
+  """
+  A tool definition in the OpenAI API response.
+  """
+  type: Literal["function"]
+  function: "ToolDefinition"
 
 class ToolDefinition(BaseModel):
   """

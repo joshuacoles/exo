@@ -1,7 +1,7 @@
 from typing import Optional, List, Dict, Any, Union
 
-from exo.inference.tool_calling import ToolParser, WrappedJsonToolParser, Tokenizer
-from exo.tools import ToolDefinition, ToolChoiceModel
+from exo.inference.tool_calling import ToolParser, WrappedJsonToolParser, Tokenizer, LlamaPythonTag
+from exo.tools import ToolDefinition, ToolChoiceModel, WrappedToolDefinition
 
 
 class GenerationOptions:
@@ -37,12 +37,12 @@ class GenerationOptions:
       return None
 
     # Convert the tools list to ToolDefinition objects
-    tool_definitions = [ToolDefinition.model_validate(tool) for tool in self.tools]
+    tool_definitions = [WrappedToolDefinition.model_validate(tool).function for tool in self.tools]
     tool_choice = ToolChoiceModel.validate_python(self.tool_choice) if self.tool_choice is not None else None
 
     # Use WrappedJsonToolFormat as the format class
     # We need to provide start and end tokens for the format
-    return WrappedJsonToolParser(
+    return LlamaPythonTag(
       tokenizer=tokenizer,
       tools=tool_definitions,
       tool_choice=tool_choice,
