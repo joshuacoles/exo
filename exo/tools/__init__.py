@@ -12,9 +12,13 @@ class ToolDefinition(BaseModel):
   parameters: Dict[str, Any]
 
 
-class AssistantTooCall(BaseModel):
+class AssistantToolCall(BaseModel):
   class AssistantTooCallInner(BaseModel):
     name: str
+
+    # For complete tool calls this should be the JSON encoded arguments for the function, conforming to the parameters
+    # JSON schema defined in the tool definition. In the case of a streamed response this may be an incremental chunk,
+    # which when assembled into a whole, conforms to the JSON schema.
     arguments: str
 
   """

@@ -31,6 +31,7 @@ from exo.download.new_shard_download import delete_model
 import tempfile
 from exo.apputil import create_animation_mp4
 from collections import defaultdict
+from exo.tools import AssistantToolCall
 
 if platform.system().lower() == "darwin" and platform.machine().lower() == "arm64":
   import mlx.core as mx
@@ -415,7 +416,7 @@ class ChatGPTAPI:
 
     try:
       generation_options = chat_request.to_generation_options()
-      api_tool_parser = generation_options.tool_parser()
+      api_tool_parser = generation_options.tool_parser(tokenizer)
 
       await asyncio.wait_for(asyncio.shield(asyncio.create_task(self.node.process_prompt(
         shard,
@@ -448,39 +449,44 @@ class ChatGPTAPI:
               timeout=self.response_timeout
             )
 
-            tokens, new_tool_call_name = api_tool_parser.parse_new_tool_call(tokens)
-            if new_tool_call_name is not None:
-              stream_loc_type = "tool_calls"
-              tool_call_index += 1
-              tool_call_id = str(uuid.uuid4())
+            decoded = tokenizer.decode(tokens)
 
-              # When starting a new tool call we emit an initial chunk with the tool call id and name that will later be updated with the arguments
-              # streamed in subsequent chunks.
-              completion = completion_wrapper(
-                request_id,
-                "chat.completion",
-                chat_request.model,
-                [{
-                  "index": tool_call_index,
-                  "logprobs": None,
-                  "finish_reason": None,
-                  "delta": {
-                    "tool_calls": [
-                      {
-                        "index": tool_call_index,
-                        "id": tool_call_id,
-                        "type": "function",
-                        "function": {
-                          "name": new_tool_call_name,
-                          "arguments": ""
+            if len(tokens) > 0 and tokens[-1] == tokenizer.eos_token_id:
+              # We do not return the EOS token in the response
+              tokens.pop(-1)
+
+            remaining_decoded_content, tool_calls = api_tool_parser.parse_tool_calls(decoded)
+            
+            if tool_calls is not None:
+              for tool_call in tool_calls:
+                stream_loc_type = "tool_calls"
+                tool_call_index += 1
+                tool_call_id = str(uuid.uuid4())
+
+                # When starting a new tool call we emit an initial chunk with the tool call id and name that will later be updated with the arguments
+                # streamed in subsequent chunks.
+                completion = completion_wrapper(
+                  request_id,
+                  "chat.completion",
+                  chat_request.model,
+                  [{
+                    "index": tool_call_index,
+                    "logprobs": None,
+                    "finish_reason": None,
+                    "delta": {
+                      "tool_calls": [
+                        {
+                          "index": tool_call_index,
+                          "id": tool_call_id,
+                          "type": "function",
+                          "function": tool_call.model_dump()
                         }
-                      }
-                    ]
-                  },
-                }]
-              )
+                      ]
+                    },
+                  }]
+                )
 
-              await response.write(self.sse_data_chunk(completion))
+                await response.write(self.sse_data_chunk(completion))
 
             # FIXME: What are our requirements for tokens, I feel we are double checking on len(tokens) here
             if len(tokens) == 0 and not is_finished:
@@ -574,7 +580,8 @@ class ChatGPTAPI:
           # We do not return the EOS token in the response
           tokens.pop(-1)
 
-        tokens, tool_calls = api_tool_parser.parse_tool_calls_complete(tokens)
+        decoded = tokenizer.decode(tokens)
+        remaining_decoded_content, tool_calls = api_tool_parser.parse_tool_calls(decoded)
 
         return web.json_response(completion_wrapper(
           request_id,
@@ -586,8 +593,12 @@ class ChatGPTAPI:
             "finish_reason": finish_reason,
             "message": {
               "role": "assistant",
-              "content": tokenizer.decode(tokens),
-              "tool_calls": tool_calls,
+              "content": remaining_decoded_content,
+              "tool_calls": [AssistantToolCall(
+                id=str(uuid.uuid4()),
+                type="function",
+                function=tool_call,
+              ) for tool_call in tool_calls],
             }
           }]
         ))
