@@ -597,12 +597,12 @@ class ChatGPTAPI:
             "finish_reason": finish_reason,
             "message": {
               "role": "assistant",
-              "content": remaining_decoded_content,
+              "content": remaining_decoded_content if not tool_calls  else None,
               "tool_calls": [AssistantToolCall(
                 id=str(uuid.uuid4()),
                 type="function",
                 function=tool_call,
-              ) for tool_call in tool_calls] if api_tool_parser else None,
+              ).model_dump_json() for tool_call in tool_calls] if api_tool_parser else None,
             }
           }]
         ))

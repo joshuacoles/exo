@@ -70,7 +70,7 @@ class BufferedOutput:
     self.guidance_interpreter = LLInterpreter(
       llg_from_tokenizer(self.tokenizer, n_vocab=self.tokenizer.vocab_size),
       grammar_definition,
-      # TODO: Try enable these, I think this will involve linking out state machine into theirs more
+      # These can't be enabled with how we are currently constructing the tokenizer
       enable_ff_tokens=False,
       enable_backtrack=False,
       log_level=2
@@ -81,22 +81,8 @@ class BufferedOutput:
   def enter_tool_mode(self):
     self.tool_mode = True
     tool_grammar = self.tool_parser.tool_grammar()
-    # Write the tool grammar to a temp file for debugging/testing
-    import os
-    import datetime
-
-    # Create a file with the tool grammar in the current directory with date in the name
-    current_date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    grammar_filename = f"tool_grammar_{current_date}.grammar"
-
-    with open(grammar_filename, 'w') as grammar_file:
-        grammar_file.write(tool_grammar)
-
-    print(f"Tool grammar written to file: {grammar_filename}")
-
-    b = llg_from_tokenizer(self.tokenizer, n_vocab=self.tokenizer.vocab_size)
     self.tool_guidance_interpreter = LLInterpreter(
-      b,
+      llg_from_tokenizer(self.tokenizer, n_vocab=self.tokenizer.vocab_size),
       json.dumps({"grammars": [{"lark_grammar": tool_grammar}]}),
       enable_ff_tokens=False,
       enable_backtrack=False,
@@ -104,6 +90,9 @@ class BufferedOutput:
     )
 
     self.tool_guidance_interpreter.start_without_prompt()
+
+    # We have to call compute mask to resolve issues wrt to FF tokens not being enabled
+    self.tool_guidance_interpreter.compute_mask()
     s = self.tool_parser.start_token()
     self.tool_guidance_interpreter.commit_token(s)
 

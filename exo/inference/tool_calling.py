@@ -117,9 +117,9 @@ json_body: %json{json.dumps(generate_tool_call_json_schema(self.active_tools(), 
     offset = 0
     tool_calls = []
 
-    for i, m in enumerate(re.finditer(r"<\|python_tag\|>(.+)", content)):
+    for i, m in enumerate(re.finditer(r"<\|python_tag\|>(.+)<\|eom_id\|>", content)):
       if i == 0:
-        offset = m.start()
+        offset = m.end()
 
       try:
         remapped = json.loads(m.group(1))
@@ -127,7 +127,7 @@ json_body: %json{json.dumps(generate_tool_call_json_schema(self.active_tools(), 
         # Rename "parameters" to "arguments" as that is the expected format
         tool_calls.append(AssistantToolCall.AssistantTooCallInner.model_validate({
           "name": remapped["name"],
-          "arguments": remapped["parameters"]
+          "arguments": json.dumps(remapped["parameters"])
         }))
       except json.JSONDecodeError as e:
         if DEBUG >= 2: print(f"Failed to parse python_tag tool calls: {e}")
