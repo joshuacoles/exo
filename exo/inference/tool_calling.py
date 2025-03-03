@@ -1,6 +1,9 @@
 from pydantic import BaseModel
 from typing import Dict, Any, Union, Literal, List, Optional
 import json
+import re
+
+from exo import DEBUG
 
 
 class ToolDefinition(BaseModel):
@@ -82,13 +85,18 @@ class ToolParser:
     """
     raise NotImplementedError()
 
+  def parse_tool_calls_complete(self, tokens: str) -> Optional[list[dict]]:
+    raise NotImplementedError()
+
+  def parse_new_tool_call(self, tokens: list[int]) -> tuple[list[int], Optional[str]]:
+    raise NotImplementedError()
+
 
 class WrappedJsonToolParser(ToolParser):
   def __init__(self, tools: List[ToolDefinition], tool_choice: Optional[ToolChoice], start_token: str, end_token: str):
     super().__init__(tools, tool_choice)
     self.start_token = start_token
     self.end_token = end_token
-
 
   def start_token(self):
     return self.start_token
@@ -101,6 +109,24 @@ class WrappedJsonToolParser(ToolParser):
     start: {self.start_token} tool_call {self.end_token}
     tool_call: %json{{{generate_tool_call_json_schema(self.active_tools())}}}
     """
+
+  def parse_tool_calls_complete(self, tokens: list[int]) -> tuple[list[int], list[dict]]:
+    offset = 0
+    tool_calls = []
+
+    for i, m in enumerate(re.finditer(r"<tool_call>\n(.+)?\n</tool_call>", tokens)):
+      if i == 0:
+        offset = m.start()
+      try:
+        func = json.loads(m.group(1))
+        tool_calls.append({"type": "function", "function": func})
+        if isinstance(func["arguments"], str):
+          func["arguments"] = json.loads(func["arguments"])
+      except json.JSONDecodeError as e:
+        if DEBUG >= 2: print(f"Failed to parse standard tool calls: {e}")
+
+    return tokens[:offset], tool_calls
+
 
 class LlamaPythonTag(ToolParser):
   def __init__(self, tools: List[ToolDefinition], tool_choice: Optional[ToolChoice], start_token: str, end_token: str):
@@ -119,6 +145,29 @@ class LlamaPythonTag(ToolParser):
     fun_call: <|python_tag|> json_body <|eom_id|>
     json_body: %json{{{generate_tool_call_json_schema(self.active_tools(), "parameters")}}}
     """
+
+  def parse_tool_calls_complete(self, tokens: list[int]) -> tuple[list[int], list[dict]]:
+    offset = 0
+    tool_calls = []
+
+    for i, m in enumerate(re.finditer(r"<\|python_tag\|>(.+)", content)):
+      if i == 0:
+        offset = m.start()
+
+      try:
+        func_data = json.loads(m.group(1))
+        # Convert from "parameters" format to "arguments" format if needed
+        if "parameters" in func_data and "arguments" not in func_data:
+          func = {
+            "name": func_data["name"],
+            "arguments": func_data["parameters"]
+          }
+        else:
+          func = func_data
+
+        tool_calls.append({"type": "function", "function": func})
+      except json.JSONDecodeError as e:
+        if DEBUG >= 2: print(f"Failed to parse python_tag tool calls: {e}")
 
 
 def generate_tool_grammar(tools: List[ToolDefinition], tool_choice: Union[ToolChoice, None]) -> Union[str, None]:
