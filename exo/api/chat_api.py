@@ -13,8 +13,8 @@ from exo.inference.tokenizers import resolve_tokenizer
 from exo.orchestration import Node
 from exo.inference.generation_options import GenerationOptions
 from exo.models import build_base_shard, model_cards, get_repo, get_model_card
-from exo.api.response_formats import ResponseFormat
-from exo.tools import ToolChoiceModel, WrappedToolDefinition
+from exo.api.response_formats import ResponseFormat, ResponseFormatAdapter, ResponseFormatUnion
+from exo.tools import ToolChoiceModel, WrappedToolDefinition, AssistantToolCall
 from exo.tools.tool_parsers import ToolParser, get_parser_class, Tokenizer
 
 
@@ -37,23 +37,27 @@ class ChatCompletionRequest(BaseModel):
   tools: Optional[List[Dict]] = None
   max_completion_tokens: Optional[int] = None
   stop: Optional[Union[str, List[str]]] = None
-  response_format: Optional[ResponseFormat] = None
+  response_format: Optional[ResponseFormatUnion] = None
   tool_choice: Optional[Union[str, Dict]] = None
   tool_call_format: Optional[str] = None
 
-  def to_dict(self):
-    data = {
-      "model": self.model,
-      "messages": [m.to_dict() for m in self.messages],
-      "temperature": self.temperature,
-    }
-    if self.tools: data["tools"] = self.tools
-    if self.max_completion_tokens: data["max_tokens"] = self.max_completion_tokens
-    if self.stop: data["stop"] = self.stop
-    if self.response_format: data["response_format"] = self.response_format.model_dump()
-    if self.tool_choice: data["tool_choice"] = self.tool_choice
-    if self.tool_call_format: data["tool_call_format"] = self.tool_call_format
-    return data
+  @classmethod
+  def parse_chat_request(cls, data: dict, default_model: str):
+    # Ensure model is provided, falling back to the default
+    model = ensure_model(data.get("model"), default_model)
+    data["model"] = model
+
+    # Get model card and fill in default details from there
+    model_card = get_model_card(model) or {}
+    if not "tool_call_format" in data:
+      data["tool_call_format"] = model_card.get("default_tool_call_format", None)
+
+    if not "max_completion_tokens" in data:
+      data["max_completion_tokens"] = model_card.get("max_tokens", None)
+
+    # Create the request object
+    return cls.model_validate(data)
+
 
   def tool_parser(self, tokenizer: Tokenizer) -> Optional[ToolParser]:
     if not self.tools:
@@ -123,7 +127,7 @@ class ToolCall(BaseModel):
   function: ToolCallFunction
 
   @classmethod
-  def from_tool_call(cls, tool_call, index: int, id: Optional[str] = None):
+  def from_tool_call(cls, tool_call: AssistantToolCall.AssistantTooCallInner, index: int, id: Optional[str] = None):
     return cls(
       index=index,
       id=id,
@@ -154,7 +158,7 @@ class StreamingChoice(BaseChoice):
   delta: Delta
 
   @classmethod
-  def create_tool_call_choice(cls, tool_call_index: int, tool_call, tool_call_id: Optional[str] = None):
+  def create_tool_call_choice(cls, tool_call_index: int, tool_call: AssistantToolCall.AssistantTooCallInner, tool_call_id: Optional[str] = None):
     return cls(
       index=tool_call_index,
       logprobs=None,
@@ -242,6 +246,9 @@ class CompletionObject(BaseModel):
   system_fingerprint: str
   choices: List[Union[StreamingChoice, NonStreamingChoice]]
 
+  def with_choice(self, choice: Union[StreamingChoice, NonStreamingChoice]) -> "CompletionObject":
+    return self.model_copy(update={"choices": [choice]})
+
   def with_choices(self, choices: List[Union[StreamingChoice, NonStreamingChoice]]) -> "CompletionObject":
     return self.model_copy(update={"choices": choices})
 
@@ -311,7 +318,7 @@ def remap_messages(messages: List[Message]) -> List[Message]:
   return remapped_messages
 
 
-def build_prompt(tokenizer, _messages: List[Message], tools: Optional[List[Dict]] = None,
+def build_prompt(tokenizer: Tokenizer, _messages: List[Message], tools: Optional[List[Dict]] = None,
                  tool_choice: Optional[Union[str, dict]] = None):
   messages = remap_messages(_messages)
   chat_template_args = {
@@ -587,24 +594,24 @@ class ChatApi:
       # Check if we have content to send
       if decoded != '':
         if stream_loc_type == "content":
-          completion = base_completion.with_choices([
+          completion = base_completion.with_choice(
             StreamingChoice.create_content_choice(decoded)
-          ])
+          )
         else:
-          completion = base_completion.with_choices([
+          completion = base_completion.with_choice(
             StreamingChoice.create_tool_call_arguments_choice(
               tool_call_index,
               decoded
             )
-          ])
+          )
 
         yield completion
 
       # Handle completion
       if chunk.is_finished:
-        completion = base_completion.with_choices([
+        completion = base_completion.with_choice(
           StreamingChoice.create_finish_choice(chunk.finish_reason)
-        ])
+        )
 
         yield completion
         break
