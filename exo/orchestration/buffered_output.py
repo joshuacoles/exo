@@ -1,4 +1,3 @@
-import json
 import sys
 from typing import List, Tuple, Optional
 
@@ -7,8 +6,6 @@ from llguidance.hf import from_tokenizer as llg_from_tokenizer
 import numpy as np
 
 from exo import DEBUG
-from exo.tools.tool_parsers import ToolParser
-from exo.inference.grammars import lark_grammar
 
 
 class BufferedOutput:
@@ -26,10 +23,6 @@ class BufferedOutput:
   # Grammar for output structural generation
   guidance_interpreter: Optional[LLInterpreter] = None
 
-  # Tool parser for tool calls, used to generate a grammar and determine if we are in tool calling mode
-  tool_parser: Optional[ToolParser] = None
-  _tool_mode: bool = False
-
   def __init__(
     self,
     max_tokens: int,
@@ -37,7 +30,6 @@ class BufferedOutput:
     stop_sequences: List[str],
     tokenizer,
     grammar_definition: Optional[str] = None,
-    tool_parser: Optional[ToolParser] = None,
   ):
     self.buffer = []
     self.stop_seq_buffer_char_size = max(len(stop_sequence) for stop_sequence in stop_sequences) if len(
@@ -46,20 +38,11 @@ class BufferedOutput:
     self.eos_token_id = eos_token_id
     self.stop_sequences = stop_sequences
     self.tokenizer = tokenizer
-    self.tool_parser = tool_parser
-
-    if grammar_definition and tool_parser:
-      raise ValueError("Cannot specify both grammar_definition and tool_parser")
 
     # If we are generating structured responses initialize the guidance
     if grammar_definition:
       print(f"Initializing guidance with grammar definition {grammar_definition}")
       self.initialize_guidance(grammar_definition)
-    elif tool_parser:
-      print(f"BufferedOutput with tool parser {tool_parser}")
-      # Use the tool grammar for guided generation
-      tool_grammar = tool_parser.tool_grammar()
-      self.initialize_guidance(lark_grammar(tool_grammar))
 
   def initialize_guidance(self, grammar_definition: str):
     try:
@@ -74,9 +57,9 @@ class BufferedOutput:
 
       self.guidance_interpreter.start_without_prompt()
     except Exception as e:
-      print(f"Failed to initialize guidance interpreter for grammar definition {grammar_definition}: {e}", file=sys.stderr)
+      print(f"Failed to initialize guidance interpreter for grammar definition {grammar_definition}: {e}",
+            file=sys.stderr)
       raise Exception(f"Failed to initialize guidance interpreter: {e}")
-
 
   def append(self, token: int):
     # Validate token against guidance interpreter if it exists
@@ -84,12 +67,6 @@ class BufferedOutput:
       valid = self.guidance_interpreter.commit_token(token)
       if not valid:
         raise ValueError(f"Schema violation at token {token} ('{self.tokenizer.decode([token])}')")
-
-    # TODO: This is a simplification, we assume tool calls:
-    #  1. Happen at the start of the output
-    #  2. Are detectable by a single token
-    if self.tool_parser and self._token_count == 0 and token == self.tool_parser.start_token():
-      self._tool_mode = True
 
     self.buffer.append((token, self.tokenizer.decode([token])))
     self._token_count += 1
@@ -164,9 +141,6 @@ class BufferedOutput:
   def token_count(self) -> int:
     return self._token_count
 
-  def is_tool_mode(self) -> bool:
-    return self._tool_mode
-
   def next_tokens(self) -> List[int]:
     # Simplification: The only emission that happens in tool call mode is at this point.
     # This does not allow for tool streaming but greatly simplifies the code involved
@@ -175,10 +149,6 @@ class BufferedOutput:
       tokens = [token for token, _ in self.buffer]
       self.buffer = []
       return tokens
-
-    # If we are in tool mode and not finished, do not emit anything to avoid issues with partial parsing
-    if self.is_tool_mode():
-      return []
 
     # We emit tokens as they are generated once we are sure they won't constitute part of a stop sequence.
     stop_buffer_satisfied = len(self.assembled_text()) >= self.stop_seq_buffer_char_size

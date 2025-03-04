@@ -4,7 +4,6 @@ import re
 from exo import DEBUG
 from exo.tools import ToolDefinition, SpecificToolChoice, ToolChoice, AssistantToolCall
 from typing import Protocol
-from exo.inference.grammars import JSON_LARK_GRAMMAR
 
 
 class Tokenizer(Protocol):

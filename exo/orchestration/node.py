@@ -6,6 +6,7 @@ import time
 import traceback
 from typing import List, Dict, Optional, Tuple
 
+from exo.inference.grammars import lark_grammar
 from exo.networking import Discovery, PeerHandle, Server
 from exo.inference.inference_engine import Shard
 from exo.orchestration.buffered_output import BufferedOutput
@@ -174,13 +175,14 @@ class Node:
       if generation_options and generation_options.max_completion_tokens:
         max_tokens = min(max_tokens, generation_options.max_completion_tokens)
 
+      tokenizer = self.inference_engine.tokenizer
+
       self.buffered_token_output[request_id] = BufferedOutput(
-        eos_token_id=self.inference_engine.tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
         max_tokens=max_tokens,
         stop_sequences=generation_options.stop or [],
-        tokenizer=self.inference_engine.tokenizer,
+        tokenizer=tokenizer,
         grammar_definition=generation_options.grammar_definition,
-        tool_parser=generation_options.tool_parser(self.inference_engine.tokenizer),
       )
 
     buffered_output = self.buffered_token_output[request_id]

@@ -2,17 +2,20 @@ import uuid
 import time
 import asyncio
 import json
-from typing import List, Literal, Union, Dict, Any, Callable, Optional
+from typing import List, Literal, Union, Dict, Any, Callable, Optional, AsyncIterator
 from aiohttp import web
 import traceback
 from pydantic import BaseModel
 from exo import DEBUG, VERSION
 from exo.api.inference_result_manager import InferenceResultManager
+from exo.inference.grammars import lark_grammar
 from exo.inference.tokenizers import resolve_tokenizer
 from exo.orchestration import Node
 from exo.inference.generation_options import GenerationOptions
 from exo.models import build_base_shard, model_cards, get_repo, get_model_card
 from exo.api.response_formats import ResponseFormat
+from exo.tools import ToolChoiceModel, WrappedToolDefinition
+from exo.tools.tool_parsers import ToolParser, get_parser_class, Tokenizer
 
 
 class Message(BaseModel):
@@ -52,11 +55,39 @@ class ChatCompletionRequest(BaseModel):
     if self.tool_call_format: data["tool_call_format"] = self.tool_call_format
     return data
 
-  def to_generation_options(self) -> GenerationOptions:
+  def tool_parser(self, tokenizer: Tokenizer) -> Optional[ToolParser]:
+    if not self.tools:
+      return None
+
+    # Convert the tools list to ToolDefinition objects
+    tool_definitions = [WrappedToolDefinition.model_validate(tool).function for tool in self.tools]
+    tool_choice = ToolChoiceModel.validate_python(self.tool_choice) if self.tool_choice is not None else None
+
+    # Fix: Use a literal value instead of a string variable
+    tool_call_format_literal: Literal['tool_call', 'llama_json', 'watt'] = "llama_json"
+    if self.tool_call_format in ['tool_call', 'llama_json', 'watt']:
+      tool_call_format_literal = self.tool_call_format
+
+    tool_parser = get_parser_class(tool_call_format_literal)
+
+    return tool_parser(
+      tokenizer=tokenizer,
+      tools=tool_definitions,
+      tool_choice=tool_choice,
+    )
+
+  def to_generation_options(self, tokenizer: Tokenizer) -> GenerationOptions:
     # Determine grammar - either from response_format or function calling format
     grammar = None
     if self.response_format:
       grammar = self.response_format.to_grammar()
+
+    tool_parser = self.tool_parser(tokenizer)
+
+    if tool_parser and grammar:
+      raise ValueError("Grammar definition and tool parser cannot both be provided")
+    elif tool_parser:
+      grammar = lark_grammar(tool_parser.tool_grammar())
 
     if isinstance(self.stop, list):
       stop = self.stop
@@ -70,133 +101,138 @@ class ChatCompletionRequest(BaseModel):
       stop=stop,
       grammar_definition=grammar,
       temperature=self.temperature,
-      tools=self.tools,
-      tool_choice=self.tool_choice,
-      tool_call_format=self.tool_call_format
     )
 
 
 class ToolCallFunction(BaseModel):
-    name: str = ""
-    arguments: str = ""
+  name: str = ""
+  arguments: str = ""
 
-    @classmethod
-    def from_tool_call(cls, tool_call):
-        return cls(
-            name=tool_call.name,
-            arguments=""
-        )
+  @classmethod
+  def from_tool_call(cls, tool_call):
+    return cls(
+      name=tool_call.name,
+      arguments=""
+    )
+
 
 class ToolCall(BaseModel):
-    index: Optional[int] = None
-    id: Optional[str] = None
-    type: Literal["function"] = "function"
-    function: ToolCallFunction
+  index: Optional[int] = None
+  id: Optional[str] = None
+  type: Literal["function"] = "function"
+  function: ToolCallFunction
 
-    @classmethod
-    def from_tool_call(cls, tool_call, index: int, id: Optional[str] = None):
-        return cls(
-            index=index,
-            id=id,
-            type="function",
-            function=ToolCallFunction.from_tool_call(tool_call)
-        )
+  @classmethod
+  def from_tool_call(cls, tool_call, index: int, id: Optional[str] = None):
+    return cls(
+      index=index,
+      id=id,
+      type="function",
+      function=ToolCallFunction.from_tool_call(tool_call)
+    )
+
 
 class Delta(BaseModel):
-    role: Optional[str] = None
-    content: Optional[str] = None
-    tool_calls: Optional[List[ToolCall]] = None
+  role: Optional[str] = None
+  content: Optional[str] = None
+  tool_calls: Optional[List[ToolCall]] = None
+
 
 class AssistantMessage(BaseModel):
-    role: Literal["assistant"] = "assistant"
-    content: Optional[str] = None
-    tool_calls: Optional[List[Dict[str, Any]]] = None
+  role: Literal["assistant"] = "assistant"
+  content: Optional[str] = None
+  tool_calls: Optional[List[Dict[str, Any]]] = None
+
 
 class BaseChoice(BaseModel):
-    index: int
-    logprobs: Optional[Any] = None
-    finish_reason: Optional[str] = None
+  index: int
+  logprobs: Optional[Any] = None
+  finish_reason: Optional[str] = None
+
 
 class StreamingChoice(BaseChoice):
-    delta: Delta
+  delta: Delta
 
-    @classmethod
-    def create_tool_call_choice(cls, tool_call_index: int, tool_call, tool_call_id: Optional[str] = None):
-        return cls(
+  @classmethod
+  def create_tool_call_choice(cls, tool_call_index: int, tool_call, tool_call_id: Optional[str] = None):
+    return cls(
+      index=tool_call_index,
+      logprobs=None,
+      finish_reason=None,
+      delta=Delta(
+        tool_calls=[
+          ToolCall.from_tool_call(tool_call, tool_call_index, tool_call_id)
+        ]
+      )
+    )
+
+  @classmethod
+  def create_tool_call_arguments_choice(cls, tool_call_index: int, arguments: str):
+    return cls(
+      index=tool_call_index,
+      logprobs=None,
+      finish_reason=None,
+      delta=Delta(
+        tool_calls=[
+          ToolCall(
             index=tool_call_index,
-            logprobs=None,
-            finish_reason=None,
-            delta=Delta(
-                tool_calls=[
-                    ToolCall.from_tool_call(tool_call, tool_call_index, tool_call_id)
-                ]
+            function=ToolCallFunction(
+              arguments=arguments
             )
-        )
+          )
+        ]
+      )
+    )
 
-    @classmethod
-    def create_tool_call_arguments_choice(cls, tool_call_index: int, arguments: str):
-        return cls(
-            index=tool_call_index,
-            logprobs=None,
-            finish_reason=None,
-            delta=Delta(
-                tool_calls=[
-                    ToolCall(
-                        index=tool_call_index,
-                        function=ToolCallFunction(
-                            arguments=arguments
-                        )
-                    )
-                ]
-            )
-        )
+  @classmethod
+  def create_content_choice(cls, content: str):
+    return cls(
+      index=0,
+      logprobs=None,
+      finish_reason=None,
+      delta=Delta(
+        role="assistant",
+        content=content
+      )
+    )
 
-    @classmethod
-    def create_content_choice(cls, content: str):
-        return cls(
-            index=0,
-            logprobs=None,
-            finish_reason=None,
-            delta=Delta(
-                role="assistant",
-                content=content
-            )
-        )
+  @classmethod
+  def create_finish_choice(cls, finish_reason: Optional[str] = None):
+    return cls(
+      index=0,
+      logprobs=None,
+      finish_reason=finish_reason,
+      delta=Delta()
+    )
 
-    @classmethod
-    def create_finish_choice(cls, finish_reason: Optional[str] = None):
-        return cls(
-            index=0,
-            logprobs=None,
-            finish_reason=finish_reason,
-            delta=Delta()
-        )
 
 class NonStreamingChoice(BaseChoice):
-    message: AssistantMessage
+  message: AssistantMessage
 
-    @classmethod
-    def create_choice(cls, content: Optional[str], tool_calls=None, finish_reason: Optional[str] = None, api_tool_parser=None):
-        tool_calls_list = None
-        if api_tool_parser and tool_calls:
-            tool_calls_list = [
-                {
-                    "id": str(uuid.uuid4()),
-                    "type": "function",
-                    "function": tool_call.model_dump()
-                } for tool_call in tool_calls
-            ]
+  @classmethod
+  def create_choice(cls, content: Optional[str], tool_calls=None, finish_reason: Optional[str] = None,
+                    api_tool_parser=None):
+    tool_calls_list = None
+    if api_tool_parser and tool_calls:
+      tool_calls_list = [
+        {
+          "id": str(uuid.uuid4()),
+          "type": "function",
+          "function": tool_call.model_dump()
+        } for tool_call in tool_calls
+      ]
 
-        return cls(
-            index=0,
-            logprobs=None,
-            finish_reason=finish_reason,
-            message=AssistantMessage(
-                role="assistant",
-                content=content if not tool_calls else None,
-                tool_calls=tool_calls_list
-            )
-        )
+    return cls(
+      index=0,
+      logprobs=None,
+      finish_reason=finish_reason,
+      message=AssistantMessage(
+        role="assistant",
+        content=content if not tool_calls else None,
+        tool_calls=tool_calls_list
+      )
+    )
+
 
 class CompletionObject(BaseModel):
   id: str
@@ -330,6 +366,10 @@ def parse_chat_request(data: dict, default_model: str):
   # Parse messages
   messages = [Message.model_validate(msg) for msg in data.get("messages", [])]
 
+  # Get model card and handle None case for default_tool_call_format
+  model_card = get_model_card(model) or {}
+  default_tool_call_format = model_card.get("default_tool_call_format", None)
+
   # Create the request object
   return ChatCompletionRequest(
     model=model,
@@ -340,7 +380,7 @@ def parse_chat_request(data: dict, default_model: str):
     stop=data.get("stop"),
     response_format=response_format,
     tool_choice=data.get("tool_choice", None),
-    tool_call_format=data.get("tool_call_format", get_model_card(model).get("default_tool_call_format", None))
+    tool_call_format=data.get("tool_call_format", default_tool_call_format)
   )
 
 
@@ -389,12 +429,22 @@ class ChatApi:
         status=400,
       )
 
-    tokenizer = await resolve_tokenizer(get_repo(shard.model_id, self.inference_engine_classname))
+    # Fix: Handle the case where shard.model_id might be None
+    model_id = getattr(shard, "model_id", None)
+    if model_id is None:
+      return web.json_response({"detail": "Invalid model configuration"}, status=500)
+
+    repo_id = get_repo(model_id, self.inference_engine_classname)
+    if repo_id is None:
+      return web.json_response({"detail": "Could not resolve repository for model"}, status=500)
+
+    tokenizer = await resolve_tokenizer(repo_id)
     if DEBUG >= 4: print(f"[ChatGPTAPI] Resolved tokenizer: {tokenizer}")
 
     # Register the tokenizer with our result manager
     request_id = str(uuid.uuid4())
     self.result_manager.register_tokenizer(request_id, tokenizer)
+    self.result_manager.register_model_for_request(request_id, chat_request.model)
 
     # Add system prompt if set
     if self.system_prompt and not any(msg.role == "system" for msg in chat_request.messages):
@@ -411,9 +461,12 @@ class ChatApi:
     if DEBUG >= 2: print(f"[ChatGPTAPI] Processing prompt: {request_id=} {shard=} {prompt=}")
 
     try:
-      generation_options = chat_request.to_generation_options()
-      api_tool_parser = generation_options.tool_parser(tokenizer)
+      generation_options = chat_request.to_generation_options(tokenizer)
 
+      # Create tool parser if needed
+      api_tool_parser = chat_request.tool_parser(tokenizer)
+
+      # Process the prompt
       await asyncio.wait_for(asyncio.shield(asyncio.create_task(self.node.process_prompt(
         shard,
         prompt,
@@ -435,62 +488,9 @@ class ChatApi:
         await response.prepare(request)
 
         try:
-          stream_loc_type: Literal["content", "tool_calls"] = "content"
-          tool_call_index: int = -1
-          base_completion = CompletionObject.chat_completion(
-            request_id,
-            chat_request.model,
-          )
-
-          # Stream results using the inference manager
-          async for chunk in self.result_manager.get_inference_result(request_id, timeout=self.response_timeout):
-            decoded = chunk.text
-
-            if api_tool_parser:
-              decoded, tool_calls = api_tool_parser.parse_tool_calls(decoded)
-
-              if tool_calls is not None:
-                for tool_call in tool_calls:
-                  stream_loc_type = "tool_calls"
-                  tool_call_index += 1
-                  tool_call_id = str(uuid.uuid4())
-
-                  # When starting a new tool call we emit an initial chunk with the tool call id and name that will later be updated with the arguments
-                  # streamed in subsequent chunks.
-                  completion = base_completion.with_choices([
-                    StreamingChoice.create_tool_call_choice(
-                      tool_call_index,
-                      tool_call,
-                      tool_call_id
-                    )
-                  ])
-
-                  await response.write(self.sse_data_chunk(completion))
-
-            # Check if we have content to send
-            if decoded != '':
-              if stream_loc_type == "content":
-                completion = base_completion.with_choices([
-                  StreamingChoice.create_content_choice(decoded)
-                ])
-              else:
-                completion = base_completion.with_choices([
-                  StreamingChoice.create_tool_call_arguments_choice(
-                    tool_call_index,
-                    decoded
-                  )
-                ])
-
-              await response.write(self.sse_data_chunk(completion))
-
-            # Handle completion
-            if chunk.is_finished:
-              completion = base_completion.with_choices([
-                StreamingChoice.create_finish_choice(chunk.finish_reason)
-              ])
-
-              await response.write(self.sse_data_chunk(completion))
-              break
+          # Use our new async iterator
+          async for completion in self.process_inference_stream(request_id, api_tool_parser, self.response_timeout):
+            await response.write(self.sse_data_chunk(completion))
 
           # Send the DONE event when the stream is finished
           await response.write(b"data: [DONE]\n\n")
@@ -505,30 +505,16 @@ class ChatApi:
           if DEBUG >= 2:
             print(f"[ChatGPTAPI] Error processing prompt: {e}")
             traceback.print_exc()
+
           return web.json_response(
             {"detail": f"Error processing prompt: {str(e)}"},
             status=500
           )
-
       else:
-        # Non-streaming response
-        chunk = await self.result_manager.get_complete_inference_result(request_id)
-        complete_text = chunk.text
-        finish_reason = chunk.finish_reason
+        # Non-streaming response - use our new method
+        completion = await self.get_complete_response(request_id, api_tool_parser, self.response_timeout)
+        return web.json_response(completion.model_dump())
 
-        if api_tool_parser:
-          remaining_decoded_content, tool_calls = api_tool_parser.parse_tool_calls(complete_text)
-        else:
-          remaining_decoded_content = complete_text
-          tool_calls = []
-
-        return web.json_response(CompletionObject.chat_completion(
-          request_id,
-          chat_request.model,
-          [
-            NonStreamingChoice.create_choice(remaining_decoded_content, tool_calls, finish_reason, api_tool_parser)
-          ]
-        ))
     except asyncio.TimeoutError:
       return web.json_response({"detail": "Response generation timed out"}, status=408)
     except Exception as e:
@@ -547,6 +533,118 @@ class ChatApi:
       "tokens": len(tokens),
       "truncated": False,  # Not implementing truncation here
     })
+
+  async def process_inference_stream(self,
+                                     request_id: str,
+                                     api_tool_parser: Optional[ToolParser] = None,
+                                     timeout: int = 90) -> AsyncIterator[CompletionObject]:
+    """
+    Process the inference stream and yield completion objects.
+
+    Args:
+        request_id: The unique ID for this request
+        api_tool_parser: Optional tool parser for handling tool calls
+        timeout: Timeout in seconds
+
+    Yields:
+        CompletionObject instances for each chunk of the response
+    """
+    stream_loc_type: Literal["content", "tool_calls"] = "content"
+    tool_call_index: int = -1
+    base_completion = CompletionObject.chat_completion(
+      request_id,
+      self.result_manager.get_model_for_request(request_id),
+    )
+
+    # Stream results using the inference manager
+    async for chunk in self.result_manager.get_inference_result(request_id, timeout=timeout):
+      decoded = chunk.text
+
+      if api_tool_parser:
+        try:
+          decoded, tool_calls = api_tool_parser.parse_tool_calls(decoded)
+
+          if tool_calls is not None:
+            for tool_call in tool_calls:
+              stream_loc_type = "tool_calls"
+              tool_call_index += 1
+              tool_call_id = str(uuid.uuid4())
+
+              # When starting a new tool call we emit an initial chunk with the tool call id and name
+              completion = base_completion.with_choices([
+                StreamingChoice.create_tool_call_choice(
+                  tool_call_index,
+                  tool_call,
+                  tool_call_id
+                )
+              ])
+
+              yield completion
+        except Exception as e:
+          if DEBUG >= 2:
+            print(f"Error parsing tool calls: {e}")
+
+      # Check if we have content to send
+      if decoded != '':
+        if stream_loc_type == "content":
+          completion = base_completion.with_choices([
+            StreamingChoice.create_content_choice(decoded)
+          ])
+        else:
+          completion = base_completion.with_choices([
+            StreamingChoice.create_tool_call_arguments_choice(
+              tool_call_index,
+              decoded
+            )
+          ])
+
+        yield completion
+
+      # Handle completion
+      if chunk.is_finished:
+        completion = base_completion.with_choices([
+          StreamingChoice.create_finish_choice(chunk.finish_reason)
+        ])
+
+        yield completion
+        break
+
+  async def get_complete_response(self, request_id: str,
+                                  api_tool_parser: Optional[ToolParser] = None,
+                                  timeout: int = 90) -> CompletionObject:
+    """
+    Get the complete response for a non-streaming request.
+
+    Args:
+        request_id: The unique ID for this request
+        api_tool_parser: Optional tool parser for handling tool calls
+        timeout: Timeout in seconds
+
+    Returns:
+        A CompletionObject with the complete response
+    """
+    chunk = await self.result_manager.get_complete_inference_result(request_id, timeout=timeout)
+    complete_text = chunk.text
+    finish_reason = chunk.finish_reason
+
+    tool_calls = []
+    if api_tool_parser:
+      try:
+        remaining_decoded_content, tool_calls = api_tool_parser.parse_tool_calls(complete_text)
+      except Exception as e:
+        if DEBUG >= 2:
+          print(f"Error parsing tool calls: {e}")
+        remaining_decoded_content = complete_text
+    else:
+      remaining_decoded_content = complete_text
+
+    return CompletionObject.chat_completion(
+      request_id,
+      self.result_manager.get_model_for_request(request_id),
+      [
+        NonStreamingChoice.create_choice(remaining_decoded_content, tool_calls, finish_reason, api_tool_parser)
+      ]
+    )
 
 
 def ensure_model(model: Optional[str], default_model: str) -> str:
