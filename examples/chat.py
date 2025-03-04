@@ -27,7 +27,8 @@ AVAILABLE_TOOLS = [
       "parameters": {
         "type": "object",
         "properties": {},
-        "required": []
+        "required": [],
+        "additionalProperties": False
       }
     }
   },
@@ -44,7 +45,8 @@ AVAILABLE_TOOLS = [
             "description": "The city and state, e.g. San Francisco, CA"
           }
         },
-        "required": ["location"]
+        "required": ["location"],
+        "additionalProperties": False
       }
     }
   },
@@ -61,7 +63,8 @@ AVAILABLE_TOOLS = [
             "description": "The mathematical expression to evaluate"
           }
         },
-        "required": ["expression"]
+        "required": ["expression"],
+        "additionalProperties": False
       }
     }
   }
@@ -312,13 +315,13 @@ def load_system_message(file_path: str) -> str:
   try:
     with open(file_path, 'r') as f:
       system_message = f.read()
-    
+
     # Replace {functions} placeholder with tool definitions if present
     if "{functions}" in system_message:
-      functions_str = json.dumps([tool["function"] for tool in AVAILABLE_TOOLS 
+      functions_str = json.dumps([tool["function"] for tool in AVAILABLE_TOOLS
                                  if tool["type"] == "function"], indent=2)
       system_message = system_message.replace("{functions}", functions_str)
-    
+
     return system_message
   except Exception as e:
     print(f"\033[91mError loading system message: {str(e)}\033[0m")
@@ -329,7 +332,7 @@ def parse_arguments():
   """Parse command line arguments."""
   parser = argparse.ArgumentParser(description="AI Chat REPL")
   parser.add_argument("--system", "-s", type=str, help="Path to a file containing the system message")
-  parser.add_argument("--model", "-m", type=str, default="llama-3.2-1b", 
+  parser.add_argument("--model", "-m", type=str, default="llama-3.2-1b",
                      help="Default model to use (default: llama-3.2-1b)")
   return parser.parse_args()
 
@@ -337,7 +340,7 @@ def parse_arguments():
 def main():
   # Parse command line arguments
   args = parse_arguments()
-  
+
   # Initialize conversation history and model
   messages = []
   model = args.model

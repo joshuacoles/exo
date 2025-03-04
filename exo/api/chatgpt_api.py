@@ -453,14 +453,14 @@ class ChatGPTAPI:
               timeout=self.response_timeout
             )
 
-            decoded = tokenizer.decode(tokens)
-
             if len(tokens) > 0 and tokens[-1] == tokenizer.eos_token_id:
               # We do not return the EOS token in the response
               tokens.pop(-1)
 
+            decoded = tokenizer.decode(tokens)
+
             if api_tool_parser:
-              remaining_decoded_content, tool_calls = api_tool_parser.parse_tool_calls(decoded)
+              decoded, tool_calls = api_tool_parser.parse_tool_calls(decoded)
 
               if tool_calls is not None:
                 for tool_call in tool_calls:
@@ -497,11 +497,7 @@ class ChatGPTAPI:
             if len(tokens) == 0 and not is_finished:
               continue
 
-            if is_finished and len(tokens) > 0 and tokens[-1] == tokenizer.eos_token_id:
-              # We do not return the EOS token in the response
-              tokens.pop(-1)
-
-            if len(tokens) > 0:
+            if len(tokens) > 0 and decoded != '':
               if stream_loc_type == "content":
                 completion = completion_wrapper(
                   request_id,
@@ -513,7 +509,7 @@ class ChatGPTAPI:
                     "finish_reason": None,
                     "delta": {
                       "role": "assistant",
-                      "content": tokenizer.decode(tokens)
+                      "content": decoded
                     }
                   }]
                 )
@@ -530,7 +526,7 @@ class ChatGPTAPI:
                       "tool_calls": [
                         {
                           "index": tool_call_index,
-                          "function": {"arguments": tokenizer.decode(tokens)}
+                          "function": {"arguments": decoded}
                         }
                       ]
                     },
