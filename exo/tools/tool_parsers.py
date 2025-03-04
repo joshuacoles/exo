@@ -4,6 +4,7 @@ import re
 from exo import DEBUG
 from exo.tools import ToolDefinition, SpecificToolChoice, ToolChoice, AssistantToolCall
 from typing import Protocol
+from exo.inference.grammars import JSON_LARK_GRAMMAR
 
 
 class Tokenizer(Protocol):
@@ -180,3 +181,83 @@ def generate_tool_call_json_schema(tools: List[ToolDefinition], parameter_key: s
   else:
     # Return a union of all tool schemas
     return {"oneOf": schema_variants}
+
+
+class WattToolParser(ToolParser):
+  def __init__(self, tokenizer: Tokenizer, tools: List[ToolDefinition], tool_choice: Optional[ToolChoice]):
+    super().__init__(tokenizer, tools, tool_choice)
+
+  def start_token(self):
+    return self.tokenizer.encode("[")[0]
+
+  def tool_grammar(self) -> str:
+    # Extract JSON value definitions from the JSON grammar
+    json_value_defs = "\n".join([
+      line for line in JSON_LARK_GRAMMAR.split("\n") 
+      if any(term in line for term in ["value:", "object:", "array:", "STRING:", "NUMBER:", "WS:"])
+    ])
+    
+    # Create a grammar that matches the format [func_name(params_name=params_value, ...)]
+    return f"""
+%llguidance {{}}
+
+start: "[" function_call "]"
+function_call: function_name "(" parameter_list ")"
+function_name: {self._generate_function_names()}
+parameter_list: parameter | parameter "," parameter_list | ""
+parameter: parameter_name "=" parameter_value
+parameter_name: /[a-zA-Z_][a-zA-Z0-9_]*/
+parameter_value: value
+
+{json_value_defs}
+    """.strip()
+
+  def _generate_function_names(self) -> str:
+    """Generate a grammar rule for function names based on available tools."""
+    function_names = [tool.name for tool in self.active_tools()]
+    if not function_names:
+      return '""'  # Empty string if no functions available
+    return ' | '.join([f'"{name}"' for name in function_names])
+
+  def parse_tool_calls(self, content: str) -> tuple[str, list[AssistantToolCall.AssistantTooCallInner]]:
+    offset = 0
+    tool_calls = []
+
+    # Match patterns like [func_name(param1=value1, param2=value2)]
+    for i, m in enumerate(re.finditer(r'\[([\w_]+)\((.*?)\)\]', content)):
+      if i == 0:
+        offset = m.end()
+      
+      try:
+        func_name = m.group(1)
+        params_str = m.group(2)
+        
+        # Parse parameters from the format param1=value1, param2=value2
+        params = {}
+        if params_str.strip():
+          # More robust parameter parsing with regex that handles nested structures
+          param_pattern = r'(\w+)=([^,]+?)(?=,\s*\w+=|$)'
+          param_pairs = re.findall(param_pattern, params_str)
+          
+          for param_name, param_value in param_pairs:
+            # Try to parse the parameter value - it could be a string, number, boolean, etc.
+            try:
+              # First try to parse as JSON (for numbers, booleans, null, arrays, objects)
+              params[param_name] = json.loads(param_value.strip())
+            except json.JSONDecodeError:
+              # If that fails, treat it as a string (removing quotes if present)
+              param_value = param_value.strip()
+              if (param_value.startswith('"') and param_value.endswith('"')) or \
+                 (param_value.startswith("'") and param_value.endswith("'")):
+                param_value = param_value[1:-1]
+              params[param_name] = param_value
+        
+        # Create the tool call object
+        tool_calls.append(AssistantToolCall.AssistantTooCallInner.model_validate({
+          "name": func_name,
+          "arguments": json.dumps(params)
+        }))
+      except Exception as e:
+        if DEBUG >= 2: print(f"Failed to parse Watt tool calls: {e}")
+
+    return content[offset:], tool_calls
