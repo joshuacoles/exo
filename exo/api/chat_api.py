@@ -5,8 +5,7 @@ import json
 from typing import List, Literal, Union, Dict, Any, Callable, Optional
 from aiohttp import web
 import traceback
-from pathlib import Path
-
+from pydantic import BaseModel
 from exo import DEBUG, VERSION
 from exo.api.inference_result_manager import InferenceResultManager
 from exo.inference.tokenizers import resolve_tokenizer
@@ -14,23 +13,12 @@ from exo.orchestration import Node
 from exo.inference.generation_options import GenerationOptions
 from exo.models import build_base_shard, model_cards, get_repo, get_model_card
 from exo.api.response_formats import ResponseFormat
-from exo.tools import AssistantToolCall
-from exo.helpers import PrefixDict
 
 
-class PromptSession:
-  def __init__(self, request_id: str, timestamp: int, prompt: str):
-    self.request_id = request_id
-    self.timestamp = timestamp
-    self.prompt = prompt
-
-
-class Message:
-  def __init__(self, role: str, content: Union[str, List[Dict[str, Union[str, Dict[str, str]]]]],
-               tools: Optional[List[Dict]] = None):
-    self.role = role
-    self.content = content
-    self.tools = tools
+class Message(BaseModel):
+  role: str
+  content: Union[str, List[Dict[str, Union[str, Dict[str, str]]]]]
+  tools: Optional[List[Dict]] = None
 
   def to_dict(self):
     data = {"role": self.role, "content": self.content}
@@ -39,20 +27,16 @@ class Message:
     return data
 
 
-class ChatCompletionRequest:
-  def __init__(self, model: str, messages: List[Message], temperature: float, tools: Optional[List[Dict]] = None,
-               max_completion_tokens: Optional[int] = None, stop: Optional[Union[str, List[str]]] = None,
-               response_format: Optional[ResponseFormat] = None, tool_choice: Optional[Union[str, Dict]] = None,
-               tool_call_format: Optional[str] = None):
-    self.model = model
-    self.messages = messages
-    self.temperature = temperature
-    self.tools = tools
-    self.max_completion_tokens = max_completion_tokens
-    self.stop = stop
-    self.response_format = response_format
-    self.tool_choice = tool_choice
-    self.tool_call_format = tool_call_format
+class ChatCompletionRequest(BaseModel):
+  model: str
+  messages: List[Message]
+  temperature: float = 0.7
+  tools: Optional[List[Dict]] = None
+  max_completion_tokens: Optional[int] = None
+  stop: Optional[Union[str, List[str]]] = None
+  response_format: Optional[ResponseFormat] = None
+  tool_choice: Optional[Union[str, Dict]] = None
+  tool_call_format: Optional[str] = None
 
   def to_dict(self):
     data = {
@@ -63,7 +47,7 @@ class ChatCompletionRequest:
     if self.tools: data["tools"] = self.tools
     if self.max_completion_tokens: data["max_tokens"] = self.max_completion_tokens
     if self.stop: data["stop"] = self.stop
-    if self.response_format: data["response_format"] = self.response_format.to_dict()
+    if self.response_format: data["response_format"] = self.response_format.model_dump()
     if self.tool_choice: data["tool_choice"] = self.tool_choice
     if self.tool_call_format: data["tool_call_format"] = self.tool_call_format
     return data
@@ -74,9 +58,16 @@ class ChatCompletionRequest:
     if self.response_format:
       grammar = self.response_format.to_grammar()
 
+    if isinstance(self.stop, list):
+      stop = self.stop
+    elif self.stop:
+      stop = [self.stop]
+    else:
+      stop = None
+
     return GenerationOptions(
       max_completion_tokens=self.max_completion_tokens,
-      stop=self.stop,
+      stop=stop,
       grammar_definition=grammar,
       temperature=self.temperature,
       tools=self.tools,
@@ -85,19 +76,168 @@ class ChatCompletionRequest:
     )
 
 
-def completion_wrapper(
-  request_id: str,
-  object_type: Literal["chat.completion", "text_completion"],
-  model: str,
-  choices: List[dict[str, Any]]) -> dict:
-  return {
-    "id": f"chatcmpl-{request_id}",
-    "object": object_type,
-    "created": int(time.time()),
-    "model": model,
-    "system_fingerprint": f"exo_{VERSION}",
-    "choices": choices,
-  }
+class ToolCallFunction(BaseModel):
+    name: str = ""
+    arguments: str = ""
+
+    @classmethod
+    def from_tool_call(cls, tool_call):
+        return cls(
+            name=tool_call.name,
+            arguments=""
+        )
+
+class ToolCall(BaseModel):
+    index: Optional[int] = None
+    id: Optional[str] = None
+    type: Literal["function"] = "function"
+    function: ToolCallFunction
+
+    @classmethod
+    def from_tool_call(cls, tool_call, index: int, id: Optional[str] = None):
+        return cls(
+            index=index,
+            id=id,
+            type="function",
+            function=ToolCallFunction.from_tool_call(tool_call)
+        )
+
+class Delta(BaseModel):
+    role: Optional[str] = None
+    content: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = None
+
+class AssistantMessage(BaseModel):
+    role: Literal["assistant"] = "assistant"
+    content: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+
+class BaseChoice(BaseModel):
+    index: int
+    logprobs: Optional[Any] = None
+    finish_reason: Optional[str] = None
+
+class StreamingChoice(BaseChoice):
+    delta: Delta
+
+    @classmethod
+    def create_tool_call_choice(cls, tool_call_index: int, tool_call, tool_call_id: Optional[str] = None):
+        return cls(
+            index=tool_call_index,
+            logprobs=None,
+            finish_reason=None,
+            delta=Delta(
+                tool_calls=[
+                    ToolCall.from_tool_call(tool_call, tool_call_index, tool_call_id)
+                ]
+            )
+        )
+
+    @classmethod
+    def create_tool_call_arguments_choice(cls, tool_call_index: int, arguments: str):
+        return cls(
+            index=tool_call_index,
+            logprobs=None,
+            finish_reason=None,
+            delta=Delta(
+                tool_calls=[
+                    ToolCall(
+                        index=tool_call_index,
+                        function=ToolCallFunction(
+                            arguments=arguments
+                        )
+                    )
+                ]
+            )
+        )
+
+    @classmethod
+    def create_content_choice(cls, content: str):
+        return cls(
+            index=0,
+            logprobs=None,
+            finish_reason=None,
+            delta=Delta(
+                role="assistant",
+                content=content
+            )
+        )
+
+    @classmethod
+    def create_finish_choice(cls, finish_reason: Optional[str] = None):
+        return cls(
+            index=0,
+            logprobs=None,
+            finish_reason=finish_reason,
+            delta=Delta()
+        )
+
+class NonStreamingChoice(BaseChoice):
+    message: AssistantMessage
+
+    @classmethod
+    def create_choice(cls, content: Optional[str], tool_calls=None, finish_reason: Optional[str] = None, api_tool_parser=None):
+        tool_calls_list = None
+        if api_tool_parser and tool_calls:
+            tool_calls_list = [
+                {
+                    "id": str(uuid.uuid4()),
+                    "type": "function",
+                    "function": tool_call.model_dump()
+                } for tool_call in tool_calls
+            ]
+
+        return cls(
+            index=0,
+            logprobs=None,
+            finish_reason=finish_reason,
+            message=AssistantMessage(
+                role="assistant",
+                content=content if not tool_calls else None,
+                tool_calls=tool_calls_list
+            )
+        )
+
+class CompletionObject(BaseModel):
+  id: str
+  object: Literal["chat.completion", "text_completion"]
+  created: int
+  model: str
+  system_fingerprint: str
+  choices: List[Union[StreamingChoice, NonStreamingChoice]]
+
+  def with_choices(self, choices: List[Union[StreamingChoice, NonStreamingChoice]]) -> "CompletionObject":
+    return self.model_copy(update={"choices": choices})
+
+  @classmethod
+  def chat_completion(cls, request_id: str, model: str,
+                      choices: Optional[List[Union[StreamingChoice, NonStreamingChoice]]] = None) -> "CompletionObject":
+    if choices is None:
+      choices = []
+
+    return cls(
+      id=f"chatcmpl-{request_id}",
+      object="chat.completion",
+      created=int(time.time()),
+      model=model,
+      system_fingerprint=f"exo_{VERSION}",
+      choices=choices,
+    )
+
+  @classmethod
+  def text_completion(cls, request_id: str, model: str,
+                      choices: Optional[List[Union[StreamingChoice, NonStreamingChoice]]] = None) -> "CompletionObject":
+    if choices is None:
+      choices = []
+
+    return cls(
+      id=f"chatcmpl-{request_id}",
+      object="text_completion",
+      created=int(time.time()),
+      model=model,
+      system_fingerprint=f"exo_{VERSION}",
+      choices=choices,
+    )
 
 
 def remap_messages(messages: List[Message]) -> List[Message]:
@@ -179,45 +319,27 @@ def build_prompt(tokenizer, _messages: List[Message], tools: Optional[List[Dict]
     return prompt
 
 
-def parse_message(data: dict):
-  if "role" not in data or "content" not in data:
-    raise ValueError(f"Invalid message: {data}. Must have 'role' and 'content'")
-  return Message(data["role"], data["content"], data.get("tools"))
-
-
 def parse_chat_request(data: dict, default_model: str):
   # Parse response_format if provided
   response_format = None
   if "response_format" in data:
     response_format = ResponseFormat.parse_from_request(data["response_format"])
 
-  model = data.get("model", default_model)
-
-  # To be compatible with ChatGPT tools, point all gpt- model requests to default model
-  if model and model.startswith("gpt-"):
-    model = default_model
-
-  if not model or model not in model_cards:
-    if DEBUG >= 1:
-      print(f"Invalid model: {model}. Supported: {list(model_cards.keys())}. Defaulting to {default_model}")
-    model = default_model
-
-  # `max_tokens` is deprecated, but some clients may still use it, fall back to that value if max_completion_tokens is not provided.
-  max_completion_tokens = data.get("max_completion_tokens", data.get("max_tokens", None))
+  model = ensure_model(data.get("model"), default_model)
 
   # Parse messages
-  messages = [parse_message(msg) for msg in data.get("messages", [])]
+  messages = [Message.model_validate(msg) for msg in data.get("messages", [])]
 
   # Create the request object
   return ChatCompletionRequest(
-    model,
-    messages,
-    data.get("temperature", 0.7),
-    data.get("tools"),
-    max_completion_tokens,
-    data.get("stop"),
-    response_format,
-    data.get("tool_choice", None),
+    model=model,
+    messages=messages,
+    temperature=data.get("temperature", 0.7),
+    tools=data.get("tools"),
+    max_completion_tokens=data.get("max_completion_tokens", data.get("max_tokens", None)),
+    stop=data.get("stop"),
+    response_format=response_format,
+    tool_choice=data.get("tool_choice", None),
     tool_call_format=data.get("tool_call_format", get_model_card(model).get("default_tool_call_format", None))
   )
 
@@ -242,14 +364,12 @@ class ChatApi:
     self.system_prompt = system_prompt
     self.response_timeout = response_timeout
     self.on_chat_completion_request = on_chat_completion_request
-
-    # Variables moved from ChatGPTAPI
-    self.prompts: PrefixDict[str, PromptSession] = PrefixDict()
-    self.prev_token_lens: dict = {}
-    self.stream_tasks: dict = {}
     self.result_manager = result_manager
 
-  def sse_data_chunk(self, json_data: dict):
+  def sse_data_chunk(self, json_data: Union[dict, BaseModel]):
+    if isinstance(json_data, BaseModel):
+      json_data = json_data.model_dump()
+
     return f"data: {json.dumps(json_data)}\n\n".encode()
 
   async def handle_post_chat_completions(self, request):
@@ -278,7 +398,7 @@ class ChatApi:
 
     # Add system prompt if set
     if self.system_prompt and not any(msg.role == "system" for msg in chat_request.messages):
-      chat_request.messages.insert(0, Message("system", self.system_prompt))
+      chat_request.messages.insert(0, Message(role="system", content=self.system_prompt))
 
     prompt = build_prompt(tokenizer, chat_request.messages, chat_request.tools, chat_request.tool_choice)
 
@@ -317,6 +437,10 @@ class ChatApi:
         try:
           stream_loc_type: Literal["content", "tool_calls"] = "content"
           tool_call_index: int = -1
+          base_completion = CompletionObject.chat_completion(
+            request_id,
+            chat_request.model,
+          )
 
           # Stream results using the inference manager
           async for chunk in self.result_manager.get_inference_result(request_id, timeout=self.response_timeout):
@@ -333,81 +457,37 @@ class ChatApi:
 
                   # When starting a new tool call we emit an initial chunk with the tool call id and name that will later be updated with the arguments
                   # streamed in subsequent chunks.
-                  completion = completion_wrapper(
-                    request_id,
-                    "chat.completion",
-                    chat_request.model,
-                    [{
-                      "index": tool_call_index,
-                      "logprobs": None,
-                      "finish_reason": None,
-                      "delta": {
-                        "tool_calls": [
-                          {
-                            "index": tool_call_index,
-                            "id": tool_call_id,
-                            "type": "function",
-                            "function": tool_call.model_dump()
-                          }
-                        ]
-                      },
-                    }]
-                  )
+                  completion = base_completion.with_choices([
+                    StreamingChoice.create_tool_call_choice(
+                      tool_call_index,
+                      tool_call,
+                      tool_call_id
+                    )
+                  ])
 
                   await response.write(self.sse_data_chunk(completion))
 
             # Check if we have content to send
             if decoded != '':
               if stream_loc_type == "content":
-                completion = completion_wrapper(
-                  request_id,
-                  "chat.completion",
-                  chat_request.model,
-                  [{
-                    "index": 0,
-                    "logprobs": None,
-                    "finish_reason": None,
-                    "delta": {
-                      "role": "assistant",
-                      "content": decoded
-                    }
-                  }]
-                )
+                completion = base_completion.with_choices([
+                  StreamingChoice.create_content_choice(decoded)
+                ])
               else:
-                completion = completion_wrapper(
-                  request_id,
-                  "chat.completion",
-                  chat_request.model,
-                  [{
-                    "index": tool_call_index,
-                    "logprobs": None,
-                    "finish_reason": None,
-                    "delta": {
-                      "tool_calls": [
-                        {
-                          "index": tool_call_index,
-                          "function": {"arguments": decoded}
-                        }
-                      ]
-                    },
-                  }]
-                )
+                completion = base_completion.with_choices([
+                  StreamingChoice.create_tool_call_arguments_choice(
+                    tool_call_index,
+                    decoded
+                  )
+                ])
 
               await response.write(self.sse_data_chunk(completion))
 
             # Handle completion
             if chunk.is_finished:
-              completion = completion_wrapper(
-                request_id,
-                "chat.completion",
-                chat_request.model,
-                [{
-                  "index": 0,
-                  "logprobs": None,
-                  "finish_reason": chunk.finish_reason,
-                  "delta": {}
-                }]
-              )
+              completion = base_completion.with_choices([
+                StreamingChoice.create_finish_choice(chunk.finish_reason)
+              ])
 
               await response.write(self.sse_data_chunk(completion))
               break
@@ -442,24 +522,12 @@ class ChatApi:
           remaining_decoded_content = complete_text
           tool_calls = []
 
-        return web.json_response(completion_wrapper(
+        return web.json_response(CompletionObject.chat_completion(
           request_id,
-          "chat.completion",
           chat_request.model,
-          [{
-            "index": 0,
-            "logprobs": None,
-            "finish_reason": finish_reason,
-            "message": {
-              "role": "assistant",
-              "content": remaining_decoded_content if not tool_calls else None,
-              "tool_calls": [AssistantToolCall(
-                id=str(uuid.uuid4()),
-                type="function",
-                function=tool_call,
-              ).model_dump() for tool_call in tool_calls] if api_tool_parser else None,
-            }
-          }]
+          [
+            NonStreamingChoice.create_choice(remaining_decoded_content, tool_calls, finish_reason, api_tool_parser)
+          ]
         ))
     except asyncio.TimeoutError:
       return web.json_response({"detail": "Response generation timed out"}, status=408)
@@ -469,15 +537,9 @@ class ChatApi:
 
   async def handle_post_chat_token_encode(self, request):
     data = await request.json()
-    model = data.get("model", self.default_model)
-    if model and model.startswith("gpt-"):  # Handle gpt- model requests
-      model = self.default_model
-    if not model or model not in model_cards:
-      if DEBUG >= 1: print(
-        f"Invalid model: {model}. Supported: {list(model_cards.keys())}. Defaulting to {self.default_model}")
-      model = self.default_model
+    model = ensure_model(data.get("model"), self.default_model)
     shard = build_base_shard(model, self.inference_engine_classname)
-    messages = [parse_message(msg) for msg in data.get("messages", [])]
+    messages = [Message.model_validate(msg) for msg in data.get("messages", [])]
     tokenizer = await resolve_tokenizer(get_repo(shard.model_id, self.inference_engine_classname))
     prompt = build_prompt(tokenizer, messages, data.get("tools", None))
     tokens = tokenizer.encode(prompt)
@@ -485,3 +547,19 @@ class ChatApi:
       "tokens": len(tokens),
       "truncated": False,  # Not implementing truncation here
     })
+
+
+def ensure_model(model: Optional[str], default_model: str) -> str:
+  if not model:
+    return default_model
+
+  if model and model.startswith("gpt-"):  # Handle gpt- model requests
+    return default_model
+
+  if model not in model_cards:
+    if DEBUG >= 1:
+      print(f"Invalid model: {model}. Supported: {list(model_cards.keys())}. Defaulting to {default_model}")
+
+    return default_model
+
+  return model
