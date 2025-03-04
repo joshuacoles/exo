@@ -65,6 +65,7 @@ AVAILABLE_TOOLS = [
   }
 ]
 
+EXO_PORT = os.getenv("EXO_PORT", "52415")
 
 # Implement tool functions
 def get_current_time(_: Dict[str, Any] = None) -> Dict[str, str]:
@@ -127,7 +128,7 @@ def chat_completion(messages: List[Dict[str, str]], model: str = "llama-3.2-1b",
     request_data["tool_choice"] = "auto"
 
   response = requests.post(
-    "http://localhost:6300/v1/chat/completions",
+    f"http://localhost:{EXO_PORT}/v1/chat/completions",
     json=request_data,
     stream=stream
   )
