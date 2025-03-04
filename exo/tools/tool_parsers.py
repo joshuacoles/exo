@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Literal, Type
 import json
 import re
 from exo import DEBUG
@@ -13,6 +13,17 @@ class Tokenizer(Protocol):
 
   def decode(self, tokens: List[int]) -> str:
     ...
+
+
+def get_parser_class(tool_call_format: Literal["tool_call", "llama_json", "watt"]) -> Type["ToolParser"]:
+  if tool_call_format == "tool_call":
+    return WrappedJsonToolParser
+  elif tool_call_format == "llama_json":
+    return LlamaPythonTag
+  elif tool_call_format == "watt":
+    return WattToolParser
+  else:
+    raise ValueError(f"Unknown tool parser format: {tool_call_format}")
 
 
 class ToolParser:
@@ -197,10 +208,10 @@ class WattToolParser(ToolParser):
   def tool_grammar(self) -> str:
     # Extract JSON value definitions from the JSON grammar
     json_value_defs = "\n".join([
-      line for line in JSON_LARK_GRAMMAR.split("\n") 
+      line for line in JSON_LARK_GRAMMAR.split("\n")
       if any(term in line for term in ["value:", "object:", "array:", "STRING:", "NUMBER:", "WS:"])
     ])
-    
+
     # Create a grammar that matches the format [func_name(params_name=params_value, ...)]
     return f"""
 %llguidance {{}}
@@ -213,7 +224,22 @@ parameter: parameter_name "=" parameter_value
 parameter_name: /[a-zA-Z_][a-zA-Z0-9_]*/
 parameter_value: value
 
-{json_value_defs}
+value: object
+     | array
+     | STRING
+     | NUMBER
+     | ("true" | "false" | "null") WS
+
+object: "{{" WS (STRING ":" WS value ("," WS STRING ":" WS value)*)? "}}" WS
+array: "[" WS (value ("," WS value)*)? "]" WS
+
+// escapes
+STRING: "\"" ((/[^"\\x7F\\x00-\\x1F]/ | "\\" (/["\\bfnrt]/ | "u" /[0-9a-fA-F]/{{4,4}})))* "\"" WS
+
+NUMBER: "-"? (/[0-9]/ | /[1-9]/ /[0-9]/{{0,15}}) ("." /[0-9]/+)? (/[eE]/ /[-+]/? /[0-9]/ /[1-9]/{{0,15}})? WS
+
+// Optional space: by convention, applied in this grammar after literal chars when allowed
+WS: "" | " " | "\n" /[ \t]/{{0,20}}
     """.strip()
 
   def _generate_function_names(self) -> str:
@@ -231,18 +257,18 @@ parameter_value: value
     for i, m in enumerate(re.finditer(r'\[([\w_]+)\((.*?)\)\]', content)):
       if i == 0:
         offset = m.end()
-      
+
       try:
         func_name = m.group(1)
         params_str = m.group(2)
-        
+
         # Parse parameters from the format param1=value1, param2=value2
         params = {}
         if params_str.strip():
           # More robust parameter parsing with regex that handles nested structures
           param_pattern = r'(\w+)=([^,]+?)(?=,\s*\w+=|$)'
           param_pairs = re.findall(param_pattern, params_str)
-          
+
           for param_name, param_value in param_pairs:
             # Try to parse the parameter value - it could be a string, number, boolean, etc.
             try:
@@ -252,10 +278,10 @@ parameter_value: value
               # If that fails, treat it as a string (removing quotes if present)
               param_value = param_value.strip()
               if (param_value.startswith('"') and param_value.endswith('"')) or \
-                 (param_value.startswith("'") and param_value.endswith("'")):
+                (param_value.startswith("'") and param_value.endswith("'")):
                 param_value = param_value[1:-1]
               params[param_name] = param_value
-        
+
         # Create the tool call object
         tool_calls.append(AssistantToolCall.AssistantTooCallInner.model_validate({
           "name": func_name,

@@ -1,4 +1,5 @@
 import json
+import sys
 from typing import List, Tuple, Optional
 
 from llguidance import LLInterpreter
@@ -61,16 +62,21 @@ class BufferedOutput:
       self.initialize_guidance(lark_grammar(tool_grammar))
 
   def initialize_guidance(self, grammar_definition: str):
-    self.guidance_interpreter = LLInterpreter(
-      llg_from_tokenizer(self.tokenizer, n_vocab=self.tokenizer.vocab_size),
-      grammar_definition,
-      # These can't be enabled with how we are currently constructing the tokenizer
-      enable_ff_tokens=False,
-      enable_backtrack=False,
-      log_level=2
-    )
+    try:
+      self.guidance_interpreter = LLInterpreter(
+        llg_from_tokenizer(self.tokenizer, n_vocab=self.tokenizer.vocab_size),
+        grammar_definition,
+        # These can't be enabled with how we are currently constructing the tokenizer
+        enable_ff_tokens=False,
+        enable_backtrack=False,
+        log_level=2
+      )
 
-    self.guidance_interpreter.start_without_prompt()
+      self.guidance_interpreter.start_without_prompt()
+    except Exception as e:
+      print(f"Failed to initialize guidance interpreter for grammar definition {grammar_definition}: {e}", file=sys.stderr)
+      raise Exception(f"Failed to initialize guidance interpreter: {e}")
+
 
   def append(self, token: int):
     # Validate token against guidance interpreter if it exists
@@ -190,5 +196,5 @@ class BufferedOutput:
       mask, _ = self.guidance_interpreter.compute_mask()
       if mask is not None:
         return np.array(list(mask), dtype="int32")
-    
+
     return None

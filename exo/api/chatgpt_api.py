@@ -19,7 +19,8 @@ from exo.inference.grammars import JSON_LARK_GRAMMAR
 from exo.inference.tokenizers import resolve_tokenizer
 from exo.orchestration import Node
 from exo.inference.generation_options import GenerationOptions
-from exo.models import build_base_shard, build_full_shard, model_cards, get_repo, get_supported_models, get_pretty_name
+from exo.models import build_base_shard, build_full_shard, model_cards, get_repo, get_supported_models, get_pretty_name, \
+  get_model_card
 from typing import Callable, Optional
 from PIL import Image
 import numpy as np
@@ -56,7 +57,8 @@ class Message:
 class ChatCompletionRequest:
   def __init__(self, model: str, messages: List[Message], temperature: float, tools: Optional[List[Dict]] = None,
                max_completion_tokens: Optional[int] = None, stop: Optional[Union[str, List[str]]] = None,
-               response_format: Optional[ResponseFormat] = None, tool_choice: Optional[Union[str, Dict]] = None):
+               response_format: Optional[ResponseFormat] = None, tool_choice: Optional[Union[str, Dict]] = None,
+               tool_call_format: Optional[str] = None):
     self.model = model
     self.messages = messages
     self.temperature = temperature
@@ -65,6 +67,7 @@ class ChatCompletionRequest:
     self.stop = stop if isinstance(stop, list) else [stop] if isinstance(stop, str) else None
     self.response_format = response_format
     self.tool_choice = tool_choice
+    self.tool_call_format = tool_call_format
 
   def to_dict(self):
     return {"model": self.model, "messages": [message.to_dict() for message in self.messages],
@@ -84,6 +87,7 @@ class ChatCompletionRequest:
       temperature=self.temperature,
       tools=self.tools,
       tool_choice=self.tool_choice,
+      tool_call_format=self.tool_call_format
     )
 
 
@@ -182,8 +186,8 @@ def parse_chat_request(data: dict, default_model: str):
 
   model = data.get("model", default_model)
 
-  if model and model.startswith(
-    "gpt-"):  # to be compatible with ChatGPT tools, point all gpt- model requests to default model
+  # To be compatible with ChatGPT tools, point all gpt- model requests to default model
+  if model and model.startswith("gpt-"):
     model = default_model
 
   if not model or model not in model_cards:
@@ -195,7 +199,7 @@ def parse_chat_request(data: dict, default_model: str):
   max_completion_tokens = data.get("max_completion_tokens", data.get("max_tokens", None))
 
   return ChatCompletionRequest(
-    data.get("model", default_model),
+    model,
     [parse_message(msg) for msg in data["messages"]],
     data.get("temperature", 0.0),
     data.get("tools", None),
@@ -203,6 +207,7 @@ def parse_chat_request(data: dict, default_model: str):
     data.get("stop", None),
     response_format,
     tool_choice,
+    tool_call_format=data.get("tool_call_format", get_model_card(model).get("default_tool_call_format", None))
   )
 
 
@@ -597,7 +602,7 @@ class ChatGPTAPI:
             "finish_reason": finish_reason,
             "message": {
               "role": "assistant",
-              "content": remaining_decoded_content if not tool_calls  else None,
+              "content": remaining_decoded_content if not tool_calls else None,
               "tool_calls": [AssistantToolCall(
                 id=str(uuid.uuid4()),
                 type="function",
