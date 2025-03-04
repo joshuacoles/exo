@@ -78,7 +78,7 @@ class WrappedJsonToolParser(ToolParser):
 %llguidance {{}}
 
 start: <tool_call> json_body </tool_call>
-json_body: %json{{{generate_tool_call_json_schema(self.active_tools())}}}
+json_body: %json{generate_tool_call_json_schema(self.active_tools())}
 """.strip()
 
   def parse_tool_calls(self, content: str) -> tuple[str, list[AssistantToolCall.AssistantTooCallInner]]:

@@ -2,6 +2,13 @@ from exo.inference.shard import Shard
 from typing import Optional, List
 
 model_cards = {
+  "watt-tool-8B": {
+    "layers": 32,
+    "private": True,
+    "repo": {
+      "MLXDynamicShardInferenceEngine": "watt-ai/watt-tool-8B"
+    },
+  },
   ### llama
   "llama-3.3-70b": {
     "layers": 80,
@@ -155,6 +162,7 @@ model_cards = {
 }
 
 pretty_name = {
+  "watt-tool-8B": "Watt Tool 8B",
   "llama-3.3-70b": "Llama 3.3 70B",
   "llama-3.2-1b": "Llama 3.2 1B",
   "llama-3.2-1b-8bit": "Llama 3.2 1B (8-bit)",
@@ -231,6 +239,9 @@ pretty_name = {
   "deepseek-r1-distill-llama-70b-8bit": "DeepSeek R1 Distill Llama 70B (8-bit)",
   "deepseek-r1-distill-qwen-32b-6bit": "DeepSeek R1 Distill Qwen 32B (6-bit)",
 }
+
+def get_model_card(model_id: str):
+  return model_cards.get(model_id, None)
 
 def get_repo(model_id: str, inference_engine_classname: str) -> Optional[str]:
   return model_cards.get(model_id, {}).get("repo", {}).get(inference_engine_classname, None)
