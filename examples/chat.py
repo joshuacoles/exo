@@ -5,6 +5,7 @@ Allows interactive conversation with an AI model through the command line.
 Supports streaming responses from the AI model and tool calling.
 Includes readline support for command history within the session.
 Supports loading system messages from files.
+Allows customizing the tool call format (watt or llama_json).
 """
 
 import json
@@ -119,7 +120,7 @@ TOOL_FUNCTIONS = {
 
 
 def chat_completion(messages: List[Dict[str, str]], model: str = "llama-3.2-1b", stream: bool = False,
-                    tools: Optional[List[Dict]] = None) -> Any:
+                    tools: Optional[List[Dict]] = None, tool_call_format: str = "llama_json") -> Any:
   """Send chat completion request to local exo server."""
   request_data = {
     "model": model,
@@ -131,6 +132,7 @@ def chat_completion(messages: List[Dict[str, str]], model: str = "llama-3.2-1b",
   if tools:
     request_data["tools"] = tools
     request_data["tool_choice"] = "auto"
+    request_data["tool_call_format"] = tool_call_format
 
   response = requests.post(
     f"http://localhost:{EXO_PORT}/v1/chat/completions",
@@ -178,30 +180,31 @@ def print_help():
   print("  \033[94m/history\033[0m - Show conversation history")
   print("  \033[94m/tools\033[0m   - Toggle tool calling (on/off)")
   print("  \033[94m/system\033[0m  - Show current system message")
+  print("  \033[94m/format\033[0m  - Set tool call format (watt/llama_json)")
   print("  \033[94m/exit\033[0m    - Exit the chat")
 
 
-def handle_command(command: str, messages: List[Dict[str, Any]], model: str, tools_enabled: bool) -> tuple[
-  bool, str, bool]:
+def handle_command(command: str, messages: List[Dict[str, Any]], model: str, tools_enabled: bool, 
+                  tool_call_format: str) -> tuple[bool, str, bool, str]:
   """Handle special commands starting with /."""
   parts = command.split()
   cmd = parts[0].lower()
 
   if cmd == "/help":
     print_help()
-    return True, model, tools_enabled
+    return True, model, tools_enabled, tool_call_format
 
   elif cmd == "/clear":
-    return True, model, tools_enabled
+    return True, model, tools_enabled, tool_call_format
 
   elif cmd == "/model":
     if len(parts) > 1:
       new_model = parts[1]
       print(f"\033[92mSwitched model to: {new_model}\033[0m")
-      return True, new_model, tools_enabled
+      return True, new_model, tools_enabled, tool_call_format
     else:
       print(f"\033[92mCurrent model: {model}\033[0m")
-      return True, model, tools_enabled
+      return True, model, tools_enabled, tool_call_format
 
   elif cmd == "/history":
     if not messages:
@@ -225,7 +228,7 @@ def handle_command(command: str, messages: List[Dict[str, Any]], model: str, too
           print(f"\033[96m{role} returned tool result:\033[0m")
           print(f"  - Tool ID: {msg['tool_call_id']}")
           print(f"    Result: {msg['content']}")
-    return True, model, tools_enabled
+    return True, model, tools_enabled, tool_call_format
 
   elif cmd == "/tools":
     if len(parts) > 1:
@@ -238,7 +241,19 @@ def handle_command(command: str, messages: List[Dict[str, Any]], model: str, too
     else:
       status = "enabled" if tools_enabled else "disabled"
       print(f"\033[92mTool calling is currently {status}\033[0m")
-    return True, model, tools_enabled
+    return True, model, tools_enabled, tool_call_format
+
+  elif cmd == "/format":
+    if len(parts) > 1:
+      format_option = parts[1].lower()
+      if format_option in ("watt", "llama_json"):
+        tool_call_format = format_option
+        print(f"\033[92mTool call format set to: {tool_call_format}\033[0m")
+      else:
+        print("\033[91mInvalid format. Use 'watt' or 'llama_json'.\033[0m")
+    else:
+      print(f"\033[92mCurrent tool call format: {tool_call_format}\033[0m")
+    return True, model, tools_enabled, tool_call_format
 
   elif cmd == "/system":
     system_message = next((msg["content"] for msg in messages if msg["role"] == "system"), None)
@@ -247,13 +262,13 @@ def handle_command(command: str, messages: List[Dict[str, Any]], model: str, too
       print(f"\033[93m{system_message}\033[0m")
     else:
       print("\033[93mNo system message set.\033[0m")
-    return True, model, tools_enabled
+    return True, model, tools_enabled, tool_call_format
 
   elif cmd == "/exit":
     print("\033[92mGoodbye!\033[0m")
     sys.exit(0)
 
-  return False, model, tools_enabled
+  return False, model, tools_enabled, tool_call_format
 
 
 def format_user_prompt():
@@ -334,6 +349,8 @@ def parse_arguments():
   parser.add_argument("--system", "-s", type=str, help="Path to a file containing the system message")
   parser.add_argument("--model", "-m", type=str, default="llama-3.2-1b",
                      help="Default model to use (default: llama-3.2-1b)")
+  parser.add_argument("--tool-format", "-f", type=str, default="llama_json", choices=["watt", "llama_json"],
+                     help="Format for tool calls: watt or llama_json (default: llama_json)")
   return parser.parse_args()
 
 
@@ -345,6 +362,7 @@ def main():
   messages = []
   model = args.model
   tools_enabled = True
+  tool_call_format = args.tool_format
 
   # Load system message if provided
   if args.system:
@@ -364,6 +382,7 @@ def main():
   print("Type \033[94m/help\033[0m for available commands")
   print("Press Ctrl+C to clear current input, Ctrl+D or type \033[94m/exit\033[0m to quit")
   print("Tool calling is \033[92menabled\033[0m by default (use \033[94m/tools off\033[0m to disable)")
+  print(f"Tool call format is set to \033[92m{tool_call_format}\033[0m (use \033[94m/format\033[0m to change)")
 
   try:
     while True:
@@ -385,7 +404,8 @@ def main():
 
       # Check for commands
       if user_input.startswith('/'):
-        is_command, model, tools_enabled = handle_command(user_input, messages, model, tools_enabled)
+        is_command, model, tools_enabled, tool_call_format = handle_command(
+          user_input, messages, model, tools_enabled, tool_call_format)
         if is_command:
           if user_input.lower() == "/clear":
             messages = []
@@ -405,7 +425,8 @@ def main():
         # Use streaming response
         start_time = time.time()
         tools_param = AVAILABLE_TOOLS if tools_enabled else None
-        response = chat_completion(messages, model=model, stream=True, tools=tools_param)
+        response = chat_completion(messages, model=model, stream=True, 
+                                  tools=tools_param, tool_call_format=tool_call_format)
 
         # Process the streaming response
         full_content = ""
