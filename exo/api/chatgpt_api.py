@@ -13,6 +13,7 @@ import aiohttp_cors
 import traceback
 import signal
 from exo import DEBUG, VERSION
+from exo.api.model_api import ModelApi
 from exo.api.response_formats import ResponseFormat
 from exo.helpers import PrefixDict, shutdown, get_exo_images_dir
 from exo.inference.grammars import JSON_LARK_GRAMMAR
@@ -33,6 +34,7 @@ import tempfile
 from exo.apputil import create_animation_mp4
 from collections import defaultdict
 from exo.tools import AssistantToolCall
+from exo.api.inference_result_manager import InferenceResultManager
 
 if platform.system().lower() == "darwin" and platform.machine().lower() == "arm64":
   import mlx.core as mx
@@ -244,6 +246,7 @@ class ChatGPTAPI:
     self.token_callback.on_next(lambda _request_id, tokens, is_finished, finish_reason: asyncio.create_task(
       self.handle_tokens(_request_id, tokens, is_finished, finish_reason)))
     self.system_prompt = system_prompt
+    self.models_api = ModelApi(self.inference_engine_classname, self.node)
 
     cors = aiohttp_cors.setup(self.app)
     cors_options = aiohttp_cors.ResourceOptions(
@@ -252,21 +255,21 @@ class ChatGPTAPI:
       allow_headers="*",
       allow_methods="*",
     )
-    cors.add(self.app.router.add_get("/models", self.handle_get_models), {"*": cors_options})
-    cors.add(self.app.router.add_get("/v1/models", self.handle_get_models), {"*": cors_options})
+    cors.add(self.app.router.add_get("/models", self.models_api.handle_get_models), {"*": cors_options})
+    cors.add(self.app.router.add_get("/v1/models", self.models_api.handle_get_models), {"*": cors_options})
     cors.add(self.app.router.add_post("/chat/token/encode", self.handle_post_chat_token_encode), {"*": cors_options})
     cors.add(self.app.router.add_post("/v1/chat/token/encode", self.handle_post_chat_token_encode), {"*": cors_options})
     cors.add(self.app.router.add_post("/chat/completions", self.handle_post_chat_completions), {"*": cors_options})
     cors.add(self.app.router.add_post("/v1/chat/completions", self.handle_post_chat_completions), {"*": cors_options})
     cors.add(self.app.router.add_post("/v1/image/generations", self.handle_post_image_generations), {"*": cors_options})
     cors.add(self.app.router.add_get("/v1/download/progress", self.handle_get_download_progress), {"*": cors_options})
-    cors.add(self.app.router.add_get("/modelpool", self.handle_model_support), {"*": cors_options})
+    cors.add(self.app.router.add_get("/modelpool", self.models_api.handle_model_support), {"*": cors_options})
     cors.add(self.app.router.add_get("/healthcheck", self.handle_healthcheck), {"*": cors_options})
     cors.add(self.app.router.add_post("/quit", self.handle_quit), {"*": cors_options})
-    cors.add(self.app.router.add_delete("/models/{model_name}", self.handle_delete_model), {"*": cors_options})
-    cors.add(self.app.router.add_get("/initial_models", self.handle_get_initial_models), {"*": cors_options})
+    cors.add(self.app.router.add_delete("/models/{model_name}", self.models_api.handle_delete_model), {"*": cors_options})
+    cors.add(self.app.router.add_get("/initial_models", self.models_api.handle_get_initial_models), {"*": cors_options})
     cors.add(self.app.router.add_post("/create_animation", self.handle_create_animation), {"*": cors_options})
-    cors.add(self.app.router.add_post("/download", self.handle_post_download), {"*": cors_options})
+    cors.add(self.app.router.add_post("/download", self.models_api.handle_post_download), {"*": cors_options})
     cors.add(self.app.router.add_get("/v1/topology", self.handle_get_topology), {"*": cors_options})
     cors.add(self.app.router.add_get("/topology", self.handle_get_topology), {"*": cors_options})
 
@@ -312,31 +315,6 @@ class ChatGPTAPI:
 
   async def handle_healthcheck(self, request):
     return web.json_response({"status": "ok"})
-
-  async def handle_model_support(self, request):
-    try:
-      response = web.StreamResponse(status=200, reason='OK',
-                                    headers={'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache',
-                                             'Connection': 'keep-alive'})
-      await response.prepare(request)
-      async for path, s in self.node.shard_downloader.get_shard_download_status(self.inference_engine_classname):
-        model_data = {s.shard.model_id: {"downloaded": s.downloaded_bytes == s.total_bytes,
-                                         "download_percentage": 100 if s.downloaded_bytes == s.total_bytes else 100 * float(
-                                           s.downloaded_bytes) / float(s.total_bytes), "total_size": s.total_bytes,
-                                         "total_downloaded": s.downloaded_bytes}}
-        await response.write(f"data: {json.dumps(model_data)}\n\n".encode())
-      await response.write(b"data: [DONE]\n\n")
-      return response
-
-    except Exception as e:
-      print(f"Error in handle_model_support: {str(e)}")
-      traceback.print_exc()
-      return web.json_response({"detail": f"Server error: {str(e)}"}, status=500)
-
-  async def handle_get_models(self, request):
-    models_list = [{"id": model_name, "object": "model", "owned_by": "exo", "ready": True} for model_name, _ in
-                   model_cards.items()]
-    return web.json_response({"object": "list", "data": models_list})
 
   async def handle_post_chat_token_encode(self, request):
     data = await request.json()
@@ -712,30 +690,6 @@ class ChatGPTAPI:
       if DEBUG >= 2: traceback.print_exc()
       return web.json_response({"detail": f"Error processing prompt (see logs with DEBUG>=2): {str(e)}"}, status=500)
 
-  async def handle_delete_model(self, request):
-    model_id = request.match_info.get('model_name')
-    try:
-      if await delete_model(model_id, self.inference_engine_classname):
-        return web.json_response({"status": "success", "message": f"Model {model_id} deleted successfully"})
-      else:
-        return web.json_response({"detail": f"Model {model_id} files not found"}, status=404)
-    except Exception as e:
-      if DEBUG >= 2: traceback.print_exc()
-      return web.json_response({"detail": f"Error deleting model: {str(e)}"}, status=500)
-
-  async def handle_get_initial_models(self, request):
-    model_data = {}
-    for model_id in get_supported_models([[self.inference_engine_classname]]):
-      model_data[model_id] = {
-        "name": get_pretty_name(model_id),
-        "downloaded": None,  # Initially unknown
-        "download_percentage": None,  # Change from 0 to null
-        "total_size": None,
-        "total_downloaded": None,
-        "loading": True  # Add loading state
-      }
-    return web.json_response(model_data)
-
   async def handle_create_animation(self, request):
     try:
       data = await request.json()
@@ -765,23 +719,6 @@ class ChatGPTAPI:
 
       return web.json_response({"status": "success", "output_path": output_path})
 
-    except Exception as e:
-      if DEBUG >= 2: traceback.print_exc()
-      return web.json_response({"error": str(e)}, status=500)
-
-  async def handle_post_download(self, request):
-    try:
-      data = await request.json()
-      model_name = data.get("model")
-      if not model_name: return web.json_response({"error": "model parameter is required"}, status=400)
-      if model_name not in model_cards: return web.json_response(
-        {"error": f"Invalid model: {model_name}. Supported models: {list(model_cards.keys())}"}, status=400)
-      shard = build_full_shard(model_name, self.inference_engine_classname)
-      if not shard: return web.json_response({"error": f"Could not build shard for model {model_name}"}, status=400)
-      asyncio.create_task(
-        self.node.inference_engine.shard_downloader.ensure_shard(shard, self.inference_engine_classname))
-
-      return web.json_response({"status": "success", "message": f"Download started for model: {model_name}"})
     except Exception as e:
       if DEBUG >= 2: traceback.print_exc()
       return web.json_response({"error": str(e)}, status=500)
