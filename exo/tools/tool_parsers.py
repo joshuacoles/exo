@@ -1,4 +1,4 @@
-from typing import Dict, Any, Union, List, Optional
+from typing import Dict, Any, List, Optional
 import json
 import re
 from exo import DEBUG
@@ -133,31 +133,6 @@ json_body: %json{json.dumps(generate_tool_call_json_schema(self.active_tools(), 
         if DEBUG >= 2: print(f"Failed to parse python_tag tool calls: {e}")
 
     return content[offset:], tool_calls
-
-
-def generate_tool_grammar(tools: List[ToolDefinition], tool_choice: Union[ToolChoice, None]) -> Union[str, None]:
-  """
-  Generate a grammar for tool calling.
-  """
-
-  if tool_choice == "none":
-    return None
-  elif tool_choice == "required" or tool_choice is None:
-    return json_schema_to_grammar(generate_tool_call_json_schema(tools))
-  elif isinstance(tool_choice, SpecificToolChoice):
-    tool = next((tool for tool in tools if tool.name == tool_choice.function.name), None)
-    if tool is None:
-      raise ValueError(f"Tool {tool_choice.function.name} not found")
-    return json_schema_to_grammar(generate_tool_call_json_schema([tool]))
-  else:
-    raise ValueError(f"Invalid tool choice: {tool_choice}")
-
-
-def json_schema_to_grammar(json_schema: Dict[str, Any]) -> str:
-  """
-  Convert a JSON schema to a grammar.
-  """
-  return json.dumps({"grammars": [{"json_schema": json_schema}]})
 
 
 def generate_tool_call_json_schema(tools: List[ToolDefinition], parameter_key: str = "arguments") -> Dict[str, Any]:

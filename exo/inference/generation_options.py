@@ -1,7 +1,7 @@
 from typing import Optional, List, Dict, Any, Union
 
-from exo.inference.tool_calling import ToolParser, WrappedJsonToolParser, Tokenizer, LlamaPythonTag
-from exo.tools import ToolDefinition, ToolChoiceModel, WrappedToolDefinition
+from exo.tools.tool_parsers import ToolParser, Tokenizer, LlamaPythonTag
+from exo.tools import ToolChoiceModel, WrappedToolDefinition
 
 
 class GenerationOptions:
