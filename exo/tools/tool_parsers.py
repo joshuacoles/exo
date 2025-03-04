@@ -8,6 +8,8 @@ from exo.inference.grammars import JSON_LARK_GRAMMAR
 
 
 class Tokenizer(Protocol):
+  eos_token_id: int
+
   def encode(self, text: str) -> List[int]:
     ...
 

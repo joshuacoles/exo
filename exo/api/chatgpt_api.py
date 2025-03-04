@@ -1,13 +1,9 @@
-import re
 import uuid
 import time
 import asyncio
 import json
-import os
 from pathlib import Path
-from transformers import AutoTokenizer
-from pydantic import BaseModel
-from typing import List, Literal, Union, Dict, Optional, Any, TypedDict
+from typing import List, Literal, Union, Dict, Any, Callable, Optional
 from aiohttp import web
 import aiohttp_cors
 import traceback
@@ -22,17 +18,14 @@ from exo.orchestration import Node
 from exo.inference.generation_options import GenerationOptions
 from exo.models import build_base_shard, build_full_shard, model_cards, get_repo, get_supported_models, get_pretty_name, \
   get_model_card
-from typing import Callable, Optional
 from PIL import Image
 import numpy as np
 import base64
 from io import BytesIO
 import platform
 from exo.download.download_progress import RepoProgressEvent
-from exo.download.new_shard_download import delete_model
 import tempfile
 from exo.apputil import create_animation_mp4
-from collections import defaultdict
 from exo.tools import AssistantToolCall
 from exo.api.inference_result_manager import InferenceResultManager
 
@@ -239,12 +232,10 @@ class ChatGPTAPI:
     self.prev_token_lens: Dict[str, int] = {}
     self.stream_tasks: Dict[str, asyncio.Task] = {}
     self.default_model = default_model or "llama-3.2-1b"
-    self.token_queues = defaultdict(asyncio.Queue)
 
-    # Get the callback system and register our handler
-    self.token_callback = node.on_token.register("chatgpt-api-token-handler")
-    self.token_callback.on_next(lambda _request_id, tokens, is_finished, finish_reason: asyncio.create_task(
-      self.handle_tokens(_request_id, tokens, is_finished, finish_reason)))
+    # Initialize the inference result manager
+    self.result_manager = InferenceResultManager(node)
+
     self.system_prompt = system_prompt
     self.models_api = ModelApi(self.inference_engine_classname, self.node)
 
@@ -266,7 +257,8 @@ class ChatGPTAPI:
     cors.add(self.app.router.add_get("/modelpool", self.models_api.handle_model_support), {"*": cors_options})
     cors.add(self.app.router.add_get("/healthcheck", self.handle_healthcheck), {"*": cors_options})
     cors.add(self.app.router.add_post("/quit", self.handle_quit), {"*": cors_options})
-    cors.add(self.app.router.add_delete("/models/{model_name}", self.models_api.handle_delete_model), {"*": cors_options})
+    cors.add(self.app.router.add_delete("/models/{model_name}", self.models_api.handle_delete_model),
+             {"*": cors_options})
     cors.add(self.app.router.add_get("/initial_models", self.models_api.handle_get_initial_models), {"*": cors_options})
     cors.add(self.app.router.add_post("/create_animation", self.handle_create_animation), {"*": cors_options})
     cors.add(self.app.router.add_post("/download", self.models_api.handle_post_download), {"*": cors_options})
@@ -284,31 +276,27 @@ class ChatGPTAPI:
     self.images_dir.mkdir(parents=True, exist_ok=True)
     self.app.router.add_static('/images/', self.images_dir, name='static_images')
 
-    self.app.middlewares.append(self.timeout_middleware)
-    self.app.middlewares.append(self.log_request)
+    self.app.middlewares.append(self._timeout_middleware)
+    self.app.middlewares.append(self._log_request)
+
+  async def _timeout_middleware(self, request, handler):
+    try:
+      return await asyncio.wait_for(handler(request), timeout=self.response_timeout)
+    except asyncio.TimeoutError:
+      return web.json_response({"detail": "Request timed out"}, status=408)
+
+  async def _log_request(self, request, handler):
+    if DEBUG >= 2: print(f"Received request: {request.method} {request.path}")
+    return await handler(request)
 
   async def handle_quit(self, request):
     if DEBUG >= 1: print("Received quit signal")
     response = web.json_response({"detail": "Quit signal received"}, status=200)
     await response.prepare(request)
     await response.write_eof()
-    await shutdown(signal.SIGINT, asyncio.get_event_loop(), self.node.server)
-
-  async def timeout_middleware(self, app, handler):
-    async def middleware(request):
-      try:
-        return await asyncio.wait_for(handler(request), timeout=self.response_timeout)
-      except asyncio.TimeoutError:
-        return web.json_response({"detail": "Request timed out"}, status=408)
-
-    return middleware
-
-  async def log_request(self, app, handler):
-    async def middleware(request):
-      if DEBUG >= 2: print(f"Received request: {request.method} {request.path}")
-      return await handler(request)
-
-    return middleware
+    # Schedule the shutdown to happen after the response is sent
+    asyncio.create_task(shutdown(signal.SIGINT, asyncio.get_event_loop(), self.node.server))
+    return response
 
   async def handle_root(self, request):
     return web.FileResponse(self.static_dir / "index.html")
@@ -347,19 +335,6 @@ class ChatGPTAPI:
         print(f"Unknown progress event type: {type(progress_event)}. {progress_event}")
     return web.json_response(progress_data)
 
-  async def buffer_all_tokens(self, request_id: str) -> tuple[List[int], bool, Literal["length", "stop", "tool_calls"]]:
-    tokens = []
-    while True:
-      _tokens, is_finished, finish_reason = await asyncio.wait_for(
-        self.token_queues[request_id].get(),
-        timeout=self.response_timeout
-      )
-
-      tokens.extend(_tokens)
-      if is_finished:
-        break
-    return tokens, is_finished, finish_reason
-
   def sse_data_chunk(self, json_data: dict):
     return f"data: {json.dumps(json_data)}\n\n".encode()
 
@@ -382,12 +357,16 @@ class ChatGPTAPI:
     tokenizer = await resolve_tokenizer(get_repo(shard.model_id, self.inference_engine_classname))
     if DEBUG >= 4: print(f"[ChatGPTAPI] Resolved tokenizer: {tokenizer}")
 
+    # Register the tokenizer with our result manager
+    request_id = str(uuid.uuid4())
+    self.result_manager.register_tokenizer(request_id, tokenizer)
+
     # Add system prompt if set
     if self.system_prompt and not any(msg.role == "system" for msg in chat_request.messages):
       chat_request.messages.insert(0, Message("system", self.system_prompt))
 
     prompt = build_prompt(tokenizer, chat_request.messages, chat_request.tools, chat_request.tool_choice)
-    request_id = str(uuid.uuid4())
+
     if self.on_chat_completion_request:
       try:
         self.on_chat_completion_request(request_id, chat_request, prompt)
@@ -424,18 +403,9 @@ class ChatGPTAPI:
           stream_loc_type: Literal["content", "tool_calls"] = "content"
           tool_call_index: int = -1
 
-          # Stream tokens while waiting for inference to complete
-          while True:
-            tokens, is_finished, finish_reason = await asyncio.wait_for(
-              self.token_queues[request_id].get(),
-              timeout=self.response_timeout
-            )
-
-            if len(tokens) > 0 and tokens[-1] == tokenizer.eos_token_id:
-              # We do not return the EOS token in the response
-              tokens.pop(-1)
-
-            decoded = tokenizer.decode(tokens)
+          # Stream results using the inference manager
+          async for chunk in self.result_manager.get_inference_result(request_id, timeout=self.response_timeout):
+            decoded = chunk.text
 
             if api_tool_parser:
               decoded, tool_calls = api_tool_parser.parse_tool_calls(decoded)
@@ -471,11 +441,8 @@ class ChatGPTAPI:
 
                   await response.write(self.sse_data_chunk(completion))
 
-            # FIXME: What are our requirements for tokens, I feel we are double checking on len(tokens) here
-            if len(tokens) == 0 and not is_finished:
-              continue
-
-            if len(tokens) > 0 and decoded != '':
+            # Check if we have content to send
+            if decoded != '':
               if stream_loc_type == "content":
                 completion = completion_wrapper(
                   request_id,
@@ -513,7 +480,8 @@ class ChatGPTAPI:
 
               await response.write(self.sse_data_chunk(completion))
 
-            if is_finished:
+            # Handle completion
+            if chunk.is_finished:
               completion = completion_wrapper(
                 request_id,
                 "chat.completion",
@@ -521,7 +489,7 @@ class ChatGPTAPI:
                 [{
                   "index": 0,
                   "logprobs": None,
-                  "finish_reason": finish_reason,
+                  "finish_reason": chunk.finish_reason,
                   "delta": {}
                 }]
               )
@@ -547,23 +515,16 @@ class ChatGPTAPI:
             status=500
           )
 
-        finally:
-          # Clean up the queue for this request
-          if request_id in self.token_queues:
-            if DEBUG >= 2: print(f"[ChatGPTAPI] Cleaning up token queue: {request_id=}")
-            del self.token_queues[request_id]
       else:
-        tokens, is_finished, finish_reason = await self.buffer_all_tokens(request_id)
+        # Non-streaming response
+        chunk = await self.result_manager.get_complete_inference_result(request_id)
+        complete_text = chunk.text
+        finish_reason = chunk.finish_reason
 
-        if tokens[-1] == tokenizer.eos_token_id:
-          # We do not return the EOS token in the response
-          tokens.pop(-1)
-
-        decoded = tokenizer.decode(tokens)
         if api_tool_parser:
-          remaining_decoded_content, tool_calls = api_tool_parser.parse_tool_calls(decoded)
+          remaining_decoded_content, tool_calls = api_tool_parser.parse_tool_calls(complete_text)
         else:
-          remaining_decoded_content = decoded
+          remaining_decoded_content = complete_text
           tool_calls = []
 
         return web.json_response(completion_wrapper(
@@ -734,10 +695,6 @@ class ChatGPTAPI:
       if DEBUG >= 2: traceback.print_exc()
       return web.json_response({"detail": f"Error getting topology: {str(e)}"}, status=500)
 
-  async def handle_tokens(self, request_id: str, tokens: List[int], is_finished: bool,
-                          finish_reason: Optional[str] = None):
-    await self.token_queues[request_id].put((tokens, is_finished, finish_reason))
-
   async def run(self, host: str = "0.0.0.0", port: int = 52415):
     runner = web.AppRunner(self.app)
     await runner.setup()
@@ -753,7 +710,7 @@ class ChatGPTAPI:
     W, H = (dim - dim % 64 for dim in (img.width, img.height))
     if W != img.width or H != img.height:
       if DEBUG >= 2: print(f"Warning: image shape is not divisible by 64, downsampling to {W}x{H}")
-      img = img.resize((W, H), Image.NEAREST)  # use desired downsampling filter
+      img = img.resize((W, H), Image.Resampling.NEAREST)  # Fix: use actual enum instead of the deprecated constant
     img = mx.array(np.array(img))
     img = (img[:, :, :3].astype(mx.float32) / 255) * 2 - 1
     img = img[None]
