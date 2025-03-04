@@ -7,6 +7,7 @@ import numpy as np
 
 from exo import DEBUG
 from exo.tools.tool_parsers import ToolParser
+from exo.inference.grammars import lark_grammar
 
 
 class BufferedOutput:
@@ -21,13 +22,12 @@ class BufferedOutput:
   is_finished: bool = False
   finish_reason: Optional[str] = None
 
-  # Grammar for full output structural generation
+  # Grammar for output structural generation
   guidance_interpreter: Optional[LLInterpreter] = None
 
-  # Guided generation for tool calls.
+  # Tool parser for tool calls, used to generate a grammar and determine if we are in tool calling mode
   tool_parser: Optional[ToolParser] = None
-  tool_mode: bool = False
-  tool_guidance_interpreter: Optional[LLInterpreter] = None
+  _tool_mode: bool = False
 
   def __init__(
     self,
@@ -45,6 +45,7 @@ class BufferedOutput:
     self.eos_token_id = eos_token_id
     self.stop_sequences = stop_sequences
     self.tokenizer = tokenizer
+    self.tool_parser = tool_parser
 
     if grammar_definition and tool_parser:
       raise ValueError("Cannot specify both grammar_definition and tool_parser")
@@ -55,14 +56,9 @@ class BufferedOutput:
       self.initialize_guidance(grammar_definition)
     elif tool_parser:
       print(f"BufferedOutput with tool parser {tool_parser}")
-      self.tool_parser = tool_parser
-
-      if tool_parser.is_immediate():
-        # This will have the effect of immediately entering tool mode.
-        # TODO: Is there a better way to handle this?
-        # TODO: Can this be handled by FF_tokens and a whole output grammar? Do we want to merge the two?
-        # TODO: Should this be handled as a total output grammar?
-        self.append(tool_parser.start_token())
+      # Use the tool grammar for guided generation
+      tool_grammar = tool_parser.tool_grammar()
+      self.initialize_guidance(lark_grammar(tool_grammar))
 
   def initialize_guidance(self, grammar_definition: str):
     self.guidance_interpreter = LLInterpreter(
@@ -76,52 +72,29 @@ class BufferedOutput:
 
     self.guidance_interpreter.start_without_prompt()
 
-  def enter_tool_mode(self):
-    self.tool_mode = True
-    tool_grammar = self.tool_parser.tool_grammar()
-    self.tool_guidance_interpreter = LLInterpreter(
-      llg_from_tokenizer(self.tokenizer, n_vocab=self.tokenizer.vocab_size),
-      json.dumps({"grammars": [{"lark_grammar": tool_grammar}]}),
-      enable_ff_tokens=False,
-      enable_backtrack=False,
-      log_level=2
-    )
-
-    self.tool_guidance_interpreter.start_without_prompt()
-
-    # We have to call compute mask to resolve issues wrt to FF tokens not being enabled
-    self.tool_guidance_interpreter.compute_mask()
-    s = self.tool_parser.start_token()
-    self.tool_guidance_interpreter.commit_token(s)
-
   def append(self, token: int):
-    # Guidance interpreter is used for whole output structural generation
+    # Validate token against guidance interpreter if it exists
     if self.guidance_interpreter:
       valid = self.guidance_interpreter.commit_token(token)
       if not valid:
         raise ValueError(f"Schema violation at token {token} ('{self.tokenizer.decode([token])}')")
-    elif self.tool_mode:
-      valid = self.tool_guidance_interpreter.commit_token(token)
-      if not valid:
-        raise ValueError(f"Schema violation at token {token} ('{self.tokenizer.decode([token])}')")
+
+    # TODO: This is a simplification, we assume tool calls:
+    #  1. Happen at the start of the output
+    #  2. Are detectable by a single token
+    if self.tool_parser and self._token_count == 0 and token == self.tool_parser.start_token():
+      self._tool_mode = True
 
     self.buffer.append((token, self.tokenizer.decode([token])))
     self._token_count += 1
 
-    # If we are in tool mode and the tool guidance interpreter has a pending stop, we can finish
-    if self.tool_mode and self.tool_guidance_interpreter.has_pending_stop():
-      self.is_finished = True
-      self.finish_reason = "stop"
-      return
-
+    # Check for completion conditions
     if token == self.eos_token_id:
       self.is_finished = True
       self.finish_reason = "stop"
     elif self._token_count >= self.max_tokens:
       self.is_finished = True
       self.finish_reason = "length"
-    elif self.tool_parser and token == self.tool_parser.start_token():
-      self.enter_tool_mode()
     elif self.guidance_interpreter and self.guidance_interpreter.has_pending_stop():
       # TODO: We should handle the different stop reasons
       self.is_finished = True
@@ -185,6 +158,9 @@ class BufferedOutput:
   def token_count(self) -> int:
     return self._token_count
 
+  def is_tool_mode(self) -> bool:
+    return self._tool_mode
+
   def next_tokens(self) -> List[int]:
     # Simplification: The only emission that happens in tool call mode is at this point.
     # This does not allow for tool streaming but greatly simplifies the code involved
@@ -194,27 +170,25 @@ class BufferedOutput:
       self.buffer = []
       return tokens
 
-    # In non-tool mode we need to check if the stop sequence buffer is satisfied
-    if not self.tool_mode:
-      stop_buffer_satisfied = len(self.assembled_text()) >= self.stop_seq_buffer_char_size
+    # If we are in tool mode and not finished, do not emit anything to avoid issues with partial parsing
+    if self.is_tool_mode():
+      return []
 
-      # If so return the oldest token in the buffer
-      if stop_buffer_satisfied:
-        token, _ = self.buffer.pop(0)
-        return [token]
+    # We emit tokens as they are generated once we are sure they won't constitute part of a stop sequence.
+    stop_buffer_satisfied = len(self.assembled_text()) >= self.stop_seq_buffer_char_size
+
+    # If so return the oldest token in the buffer
+    if stop_buffer_satisfied:
+      token, _ = self.buffer.pop(0)
+      return [token]
 
     # Not enough tokens yet
     return []
 
   def get_token_mask(self) -> Optional[np.ndarray]:
-    if self.tool_mode:
-      mask, _ = self.tool_guidance_interpreter.compute_mask()
-    elif self.guidance_interpreter:
+    if self.guidance_interpreter:
       mask, _ = self.guidance_interpreter.compute_mask()
-    else:
-      return None
-
-    if mask is None:
-      return None
-
-    return np.array(list(mask), dtype="int32")
+      if mask is not None:
+        return np.array(list(mask), dtype="int32")
+    
+    return None

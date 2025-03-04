@@ -602,7 +602,7 @@ class ChatGPTAPI:
                 id=str(uuid.uuid4()),
                 type="function",
                 function=tool_call,
-              ).model_dump_json() for tool_call in tool_calls] if api_tool_parser else None,
+              ).model_dump() for tool_call in tool_calls] if api_tool_parser else None,
             }
           }]
         ))

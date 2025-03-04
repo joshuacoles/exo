@@ -54,6 +54,9 @@ class ToolParser:
   def tool_grammar(self) -> str:
     """
     Returns an LLGuidance grammar for tool calling. This should include the start token and any end tokens.
+
+    TODO: If tool calling is optional (ie not forced) then this should include a TEXT production which allows for
+          arbitrary text to be parsed.
     """
     raise NotImplementedError()
 
@@ -109,7 +112,8 @@ class LlamaPythonTag(ToolParser):
     return f"""
 %llguidance {{}}
 
-start: fun_call
+start: TEXT | fun_call
+TEXT: /[^{{](.|\n)*/
 fun_call: <|python_tag|> json_body <|eom_id|>
 json_body: %json{json.dumps(generate_tool_call_json_schema(self.active_tools(), "parameters"))}
     """.strip()

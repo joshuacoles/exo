@@ -1,3 +1,5 @@
+import json
+
 JSON_LARK_GRAMMAR = """
 %llguidance {}
 
@@ -22,3 +24,7 @@ WS: ""
      | " "
      | "\n" /[ \t]/{0,20}
 """
+
+
+def lark_grammar(grammar: str) -> str:
+    return json.dumps({"grammars": [{"lark_grammar": grammar}]})
