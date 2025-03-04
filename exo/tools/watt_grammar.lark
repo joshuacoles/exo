@@ -1,6 +1,6 @@
 %llguidance {}
 
-start: TEXT | function_call_expression
+start: %%ENTRY_PRODUCTION%%
 TEXT: /[^\[](.|\n)*/
 function_call_expression: "[" function_call "]"
 function_call: function_name "(" parameter_list ")"

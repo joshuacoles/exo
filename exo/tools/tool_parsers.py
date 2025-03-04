@@ -124,7 +124,7 @@ class LlamaPythonTag(ToolParser):
     return f"""
 %llguidance {{}}
 
-start: TEXT | fun_call
+start: {"fun_call" if self.is_immediate() else "TEXT | fun_call"}
 TEXT: /[^{{](.|\n)*/
 fun_call: <|python_tag|> json_body <|eom_id|>
 json_body: %json{json.dumps(generate_tool_call_json_schema(self.active_tools(), "parameters"))}
@@ -210,7 +210,8 @@ class WattToolParser(ToolParser):
     import os
 
     with open(os.path.join(os.path.dirname(__file__), "watt_grammar.lark"), "r") as f:
-      return f.read().replace("%%FUNCTION_NAME%%", self._generate_function_names()).strip()
+      return f.read().replace("%%FUNCTION_NAME%%", self._generate_function_names()).replace("%%ENTRY_PRODUCTION%%",
+                                                                                          "function_call_expression" if self.is_immediate() else "TEXT | function_call_expression").strip()
 
   def _generate_function_names(self) -> str:
     """Generate a grammar rule for function names based on available tools."""
