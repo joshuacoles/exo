@@ -4,6 +4,7 @@ Simple AI chat REPL with improved user experience.
 Allows interactive conversation with an AI model through the command line.
 Supports streaming responses from the AI model and tool calling.
 Includes readline support for command history within the session.
+Supports loading system messages from files.
 """
 
 import json
@@ -13,6 +14,7 @@ import sys
 import time
 import datetime
 import os
+import argparse
 from typing import List, Dict, Iterator, Any, Callable, Optional
 
 # Define available tools
@@ -68,7 +70,7 @@ AVAILABLE_TOOLS = [
 EXO_PORT = os.getenv("EXO_PORT", "52415")
 
 # Implement tool functions
-def get_current_time(_: Dict[str, Any] = None) -> Dict[str, str]:
+def get_current_time(args: Dict[str, Any] = {}) -> Dict[str, str]:
   """Get the current date and time."""
   current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
   return {"time": current_time}
@@ -114,7 +116,7 @@ TOOL_FUNCTIONS = {
 
 
 def chat_completion(messages: List[Dict[str, str]], model: str = "llama-3.2-1b", stream: bool = False,
-                    tools: Optional[List[Dict]] = None) -> dict:
+                    tools: Optional[List[Dict]] = None) -> Any:
   """Send chat completion request to local exo server."""
   request_data = {
     "model": model,
@@ -172,10 +174,11 @@ def print_help():
   print("  \033[94m/model\033[0m   - Show or change the current model")
   print("  \033[94m/history\033[0m - Show conversation history")
   print("  \033[94m/tools\033[0m   - Toggle tool calling (on/off)")
+  print("  \033[94m/system\033[0m  - Show current system message")
   print("  \033[94m/exit\033[0m    - Exit the chat")
 
 
-def handle_command(command: str, messages: List[Dict[str, str]], model: str, tools_enabled: bool) -> tuple[
+def handle_command(command: str, messages: List[Dict[str, Any]], model: str, tools_enabled: bool) -> tuple[
   bool, str, bool]:
   """Handle special commands starting with /."""
   parts = command.split()
@@ -211,8 +214,8 @@ def handle_command(command: str, messages: List[Dict[str, str]], model: str, too
         elif "tool_calls" in msg:
           print(f"\033[95m{role} called tools:\033[0m")
           for tool_call in msg["tool_calls"]:
-            func_name = tool_call["function"]["name"]
-            args = tool_call["function"]["arguments"]
+            func_name = tool_call.get("function", {}).get("name", "")
+            args = tool_call.get("function", {}).get("arguments", "")
             print(f"  - Function: {func_name}")
             print(f"    Arguments: {args}")
         elif "tool_call_id" in msg:
@@ -232,6 +235,15 @@ def handle_command(command: str, messages: List[Dict[str, str]], model: str, too
     else:
       status = "enabled" if tools_enabled else "disabled"
       print(f"\033[92mTool calling is currently {status}\033[0m")
+    return True, model, tools_enabled
+
+  elif cmd == "/system":
+    system_message = next((msg["content"] for msg in messages if msg["role"] == "system"), None)
+    if system_message:
+      print("\n\033[1mCurrent System Message:\033[0m")
+      print(f"\033[93m{system_message}\033[0m")
+    else:
+      print("\033[93mNo system message set.\033[0m")
     return True, model, tools_enabled
 
   elif cmd == "/exit":
@@ -295,11 +307,51 @@ def handle_tool_calls(tool_calls: List[Dict], messages: List[Dict]) -> None:
       })
 
 
+def load_system_message(file_path: str) -> str:
+  """Load system message from a file, replacing {functions} with tool definitions."""
+  try:
+    with open(file_path, 'r') as f:
+      system_message = f.read()
+    
+    # Replace {functions} placeholder with tool definitions if present
+    if "{functions}" in system_message:
+      functions_str = json.dumps([tool["function"] for tool in AVAILABLE_TOOLS 
+                                 if tool["type"] == "function"], indent=2)
+      system_message = system_message.replace("{functions}", functions_str)
+    
+    return system_message
+  except Exception as e:
+    print(f"\033[91mError loading system message: {str(e)}\033[0m")
+    return ""
+
+
+def parse_arguments():
+  """Parse command line arguments."""
+  parser = argparse.ArgumentParser(description="AI Chat REPL")
+  parser.add_argument("--system", "-s", type=str, help="Path to a file containing the system message")
+  parser.add_argument("--model", "-m", type=str, default="llama-3.2-1b", 
+                     help="Default model to use (default: llama-3.2-1b)")
+  return parser.parse_args()
+
+
 def main():
+  # Parse command line arguments
+  args = parse_arguments()
+  
   # Initialize conversation history and model
   messages = []
-  model = "llama-3.2-1b"
+  model = args.model
   tools_enabled = True
+
+  # Load system message if provided
+  if args.system:
+    system_message = load_system_message(args.system)
+    if system_message:
+      messages.append({
+        "role": "system",
+        "content": system_message
+      })
+      print(f"\033[92mLoaded system message from {args.system}\033[0m")
 
   # Configure readline
   readline.parse_and_bind('tab: complete')
