@@ -39,7 +39,7 @@ class SpecificToolChoice(BaseModel):
   class SpecificToolChoiceInner(BaseModel):
     name: str
 
-  type: Literal["function"]
+  type: Literal["function"] = "function"
   function: SpecificToolChoiceInner
 
 
