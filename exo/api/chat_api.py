@@ -20,7 +20,7 @@ from exo.tools.tool_parsers import ToolParser, get_parser_class, Tokenizer
 
 class Message(BaseModel):
   role: str
-  content: Union[str, List[Dict[str, Union[str, Dict[str, str]]]]]
+  content: Optional[Union[str, List[Dict[str, Union[str, Dict[str, str]]]]]] = None
   tools: Optional[List[Dict]] = None
 
   def to_dict(self):
@@ -57,7 +57,6 @@ class ChatCompletionRequest(BaseModel):
 
     # Create the request object
     return cls.model_validate(data)
-
 
   def tool_parser(self, tokenizer: Tokenizer) -> Optional[ToolParser]:
     if not self.tools:
@@ -158,7 +157,8 @@ class StreamingChoice(BaseChoice):
   delta: Delta
 
   @classmethod
-  def create_tool_call_choice(cls, tool_call_index: int, tool_call: AssistantToolCall.AssistantTooCallInner, tool_call_id: Optional[str] = None):
+  def create_tool_call_choice(cls, tool_call_index: int, tool_call: AssistantToolCall.AssistantTooCallInner,
+                              tool_call_id: Optional[str] = None):
     return cls(
       index=tool_call_index,
       logprobs=None,
@@ -362,35 +362,6 @@ def build_prompt(tokenizer: Tokenizer, _messages: List[Message], tools: Optional
     return prompt
 
 
-def parse_chat_request(data: dict, default_model: str):
-  # Parse response_format if provided
-  response_format = None
-  if "response_format" in data:
-    response_format = ResponseFormat.parse_from_request(data["response_format"])
-
-  model = ensure_model(data.get("model"), default_model)
-
-  # Parse messages
-  messages = [Message.model_validate(msg) for msg in data.get("messages", [])]
-
-  # Get model card and handle None case for default_tool_call_format
-  model_card = get_model_card(model) or {}
-  default_tool_call_format = model_card.get("default_tool_call_format", None)
-
-  # Create the request object
-  return ChatCompletionRequest(
-    model=model,
-    messages=messages,
-    temperature=data.get("temperature", 0.7),
-    tools=data.get("tools"),
-    max_completion_tokens=data.get("max_completion_tokens", data.get("max_tokens", None)),
-    stop=data.get("stop"),
-    response_format=response_format,
-    tool_choice=data.get("tool_choice", None),
-    tool_call_format=data.get("tool_call_format", default_tool_call_format)
-  )
-
-
 class ChatApi:
   inference_engine_classname: str
   result_manager: InferenceResultManager
@@ -424,7 +395,7 @@ class ChatApi:
     if DEBUG >= 2: print(f"Handling chat completions request from {request.remote}: {data}")
 
     stream = data.get("stream", False)
-    chat_request = parse_chat_request(data, self.default_model)
+    chat_request = ChatCompletionRequest.parse_chat_request(data, self.default_model)
 
     shard = build_base_shard(chat_request.model, self.inference_engine_classname)
     if not shard:
@@ -612,6 +583,8 @@ class ChatApi:
         except Exception as e:
           if DEBUG >= 2:
             print(f"Error parsing tool calls: {e}")
+      else:
+        decoded = chunk.text
 
       # Check if we have content to send
       if decoded != '':
