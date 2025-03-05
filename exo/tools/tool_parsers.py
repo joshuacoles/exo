@@ -137,7 +137,7 @@ json_body: %json{json.dumps(generate_tool_call_json_schema(self.active_tools(), 
     offset = 0
     tool_calls = []
 
-    for i, m in enumerate(re.finditer(r"<\|python_tag\|>(.+)<\|eom_id\|>", content)):
+    for i, m in enumerate(re.finditer(r"<\|python_tag\|>(.+)<\|eom_id\|>", content, re.DOTALL)):
       if i == 0:
         offset = m.end()
 

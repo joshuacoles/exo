@@ -1,11 +1,13 @@
+import datetime
+
 import uuid
 import time
 import asyncio
 import json
-from typing import List, Literal, Union, Dict, Any, Callable, Optional, AsyncIterator
+from typing import List, Literal, Union, Dict, Any, Callable, Optional, AsyncIterator, TypeAlias
 from aiohttp import web
 import traceback
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 from exo import DEBUG, VERSION
 from exo.api.inference_result_manager import InferenceResultManager
 from exo.inference.grammars import lark_grammar
@@ -16,23 +18,17 @@ from exo.models import build_base_shard, model_cards, get_repo, get_model_card
 from exo.api.response_formats import ResponseFormat, ResponseFormatAdapter, ResponseFormatUnion
 from exo.tools import ToolChoiceModel, WrappedToolDefinition, AssistantToolCall
 from exo.tools.tool_parsers import ToolParser, get_parser_class, Tokenizer
+from openai.types.chat import ChatCompletionSystemMessageParam, ChatCompletionUserMessageParam, \
+  ChatCompletionAssistantMessageParam, ChatCompletionToolMessageParam
 
-
-class Message(BaseModel):
-  role: str
-  content: Optional[Union[str, List[Dict[str, Union[str, Dict[str, str]]]]]] = None
-  tools: Optional[List[Dict]] = None
-
-  def to_dict(self):
-    data = {"role": self.role, "content": self.content}
-    if self.tools:
-      data["tools"] = self.tools
-    return data
+Message = TypeAdapter(
+  ChatCompletionSystemMessageParam | ChatCompletionUserMessageParam | ChatCompletionAssistantMessageParam | ChatCompletionToolMessageParam)
 
 
 class ChatCompletionRequest(BaseModel):
   model: str
-  messages: List[Message]
+  messages: List[
+    ChatCompletionSystemMessageParam | ChatCompletionUserMessageParam | ChatCompletionAssistantMessageParam | ChatCompletionToolMessageParam]
   temperature: float = 0.7
   tools: Optional[List[Dict]] = None
   max_completion_tokens: Optional[int] = None
@@ -112,10 +108,10 @@ class ToolCallFunction(BaseModel):
   arguments: str = ""
 
   @classmethod
-  def from_tool_call(cls, tool_call):
+  def from_tool_call(cls, tool_call: AssistantToolCall.AssistantTooCallInner):
     return cls(
       name=tool_call.name,
-      arguments=""
+      arguments=tool_call.arguments,
     )
 
 
@@ -131,7 +127,7 @@ class ToolCall(BaseModel):
       index=index,
       id=id,
       type="function",
-      function=ToolCallFunction.from_tool_call(tool_call)
+      function=ToolCallFunction.from_tool_call(tool_call),
     )
 
 
@@ -283,83 +279,18 @@ class CompletionObject(BaseModel):
     )
 
 
-def remap_messages(messages: List[Message]) -> List[Message]:
-  remapped_messages = []
-  last_image = None
-  for message in messages:
-    if not isinstance(message.content, list):
-      remapped_messages.append(message)
-      continue
-
-    remapped_content = []
-    for content in message.content:
-      if isinstance(content, dict):
-        if content.get("type") in ["image_url", "image"]:
-          image_url = content.get("image_url", {}).get("url") or content.get("image")
-          if image_url:
-            last_image = {"type": "image", "image": image_url}
-            remapped_content.append({"type": "text", "text": "[An image was uploaded but is not displayed here]"})
-        else:
-          remapped_content.append(content)
-      else:
-        remapped_content.append(content)
-    remapped_messages.append(Message(role=message.role, content=remapped_content))
-
-  if last_image:
-    # Replace the last image placeholder with the actual image content
-    for message in reversed(remapped_messages):
-      for i, content in enumerate(message.content):
-        if isinstance(content, dict):
-          if content.get("type") == "text" and content.get(
-            "text") == "[An image was uploaded but is not displayed here]":
-            message.content[i] = last_image
-            return remapped_messages
-
-  return remapped_messages
-
-
-def build_prompt(tokenizer: Tokenizer, _messages: List[Message], tools: Optional[List[Dict]] = None,
+def build_prompt(tokenizer: Tokenizer, messages: List, tools: Optional[List[Dict]] = None,
                  tool_choice: Optional[Union[str, dict]] = None):
-  messages = remap_messages(_messages)
-  chat_template_args = {
-    "conversation": [m.to_dict() for m in messages],
-    "tokenize": False,
-    "add_generation_prompt": True
-  }
+  with open("/Users/joshuacoles/Developer/checkouts/external/exo/exo/x.jinja", "r") as f:
+    tokenizer.chat_template = f.read()
 
-  if tools and tool_choice != "none":
-    chat_template_args["tools"] = tools
-
-  try:
-    prompt = tokenizer.apply_chat_template(**chat_template_args)
-    if DEBUG >= 3: print(f"!!! Prompt: {prompt}")
-    return prompt
-  except UnicodeEncodeError:
-    # Handle Unicode encoding by ensuring everything is UTF-8
-    chat_template_args["conversation"] = [
-      {k: v.encode('utf-8').decode('utf-8') if isinstance(v, str) else v
-       for k, v in m.to_dict().items()}
-      for m in messages
-    ]
-    prompt = tokenizer.apply_chat_template(**chat_template_args)
-    if DEBUG >= 3: print(f"!!! Prompt (UTF-8 encoded): {prompt}")
-    return prompt
-  except Exception as e:
-    if DEBUG >= 1:
-      print(f"Error applying chat template: {e}")
-      print(f"Falling back to simple message concatenation")
-
-    # Simple fallback if no chat template defined
-    prompt = ""
-    for m in messages:
-      if m.role == "user":
-        prompt += f"User: {m.content}\n"
-      elif m.role == "assistant":
-        prompt += f"Assistant: {m.content}\n"
-      elif m.role == "system":
-        prompt += f"{m.content}\n"
-    prompt += "Assistant: "
-    return prompt
+  return tokenizer.apply_chat_template(
+    conversation=messages,
+    tools=tools if tool_choice != "none" else None,
+    tokenize=False,
+    add_generation_prompt=True,
+    tools_in_user_message=False
+  )
 
 
 class ChatApi:
@@ -386,7 +317,7 @@ class ChatApi:
 
   def sse_data_chunk(self, json_data: Union[dict, BaseModel]):
     if isinstance(json_data, BaseModel):
-      json_data = json_data.model_dump()
+      json_data = json_data.model_dump(exclude_none=True)
 
     return f"data: {json.dumps(json_data)}\n\n".encode()
 
@@ -394,8 +325,14 @@ class ChatApi:
     data = await request.json()
     if DEBUG >= 2: print(f"Handling chat completions request from {request.remote}: {data}")
 
+    with open(f"chat_request_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}.raw.json", "w") as f:
+      json.dump(data, f)
+
     stream = data.get("stream", False)
     chat_request = ChatCompletionRequest.parse_chat_request(data, self.default_model)
+
+    with open(f"chat_request_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}.json", "w") as f:
+      f.write(chat_request.model_dump_json())
 
     shard = build_base_shard(chat_request.model, self.inference_engine_classname)
     if not shard:

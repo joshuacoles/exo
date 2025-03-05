@@ -184,7 +184,7 @@ def print_help():
   print("  \033[94m/exit\033[0m    - Exit the chat")
 
 
-def handle_command(command: str, messages: List[Dict[str, Any]], model: str, tools_enabled: bool, 
+def handle_command(command: str, messages: List[Dict[str, Any]], model: str, tools_enabled: bool,
                   tool_call_format: str) -> tuple[bool, str, bool, str]:
   """Handle special commands starting with /."""
   parts = command.split()
@@ -284,6 +284,7 @@ def format_ai_prompt():
 def handle_tool_calls(tool_calls: List[Dict], messages: List[Dict]) -> None:
   """Process tool calls and add results to messages."""
   for tool_call in tool_calls:
+    print("TC", tool_call)
     function_name = tool_call["function"]["name"]
     function_args = json.loads(tool_call["function"]["arguments"])
     tool_call_id = tool_call["id"]
@@ -293,26 +294,15 @@ def handle_tool_calls(tool_calls: List[Dict], messages: List[Dict]) -> None:
 
     # Execute the function
     if function_name in TOOL_FUNCTIONS:
-      try:
-        result = TOOL_FUNCTIONS[function_name](function_args)
-        print(f"\033[96mResult: {json.dumps(result, indent=2)}\033[0m")
+      result = TOOL_FUNCTIONS[function_name](function_args)
+      print(f"\033[96mResult: {json.dumps(result, indent=2)}\033[0m")
 
-        # Add the function result to messages
-        messages.append({
-          "role": "tool",
-          "tool_call_id": tool_call_id,
-          "content": json.dumps(result)
-        })
-      except Exception as e:
-        error_result = {"error": str(e)}
-        print(f"\033[91mError: {json.dumps(error_result, indent=2)}\033[0m")
-
-        # Add the error result to messages
-        messages.append({
-          "role": "tool",
-          "tool_call_id": tool_call_id,
-          "content": json.dumps(error_result)
-        })
+      # Add the function result to messages
+      messages.append({
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": json.dumps(result)
+      })
     else:
       error_result = {"error": f"Function {function_name} not found"}
       print(f"\033[91mError: {json.dumps(error_result, indent=2)}\033[0m")
@@ -425,7 +415,7 @@ def main():
         # Use streaming response
         start_time = time.time()
         tools_param = AVAILABLE_TOOLS if tools_enabled else None
-        response = chat_completion(messages, model=model, stream=True, 
+        response = chat_completion(messages, model=model, stream=True,
                                   tools=tools_param, tool_call_format=tool_call_format)
 
         # Process the streaming response
@@ -509,9 +499,8 @@ def main():
           print()  # Add a newline after response
 
       except Exception as e:
-        print(f"\n\033[91mError: {str(e)}\033[0m")
-        # Remove failed message from history
         messages.pop()
+        raise e
 
   except KeyboardInterrupt:
     # This should not be reached with the inner try/except, but just in case
