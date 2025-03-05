@@ -563,11 +563,33 @@ class ChatApi:
       self.result_manager.get_model_for_request(request_id),
     )
 
+    i = 0
+    tool_parsing_chunk = None
+
     # Stream results using the inference manager
     async for chunk in self.result_manager.get_inference_result(request_id, timeout=timeout):
-      decoded = chunk.text
-
+      # TODO: This is a hacky buffering process to avoid doing incremental tool parsing, we should replace it with proper
+      #   incremental parsing logic in the future.
       if api_tool_parser:
+        if i == 0 and chunk.text.startswith(api_tool_parser.start_prefix()):
+          tool_parsing_chunk = chunk
+          i += 1
+          continue
+
+        if tool_parsing_chunk is not None:
+          tool_parsing_chunk.text = tool_parsing_chunk.text + chunk.text
+          # These will always be False / None for the tool_parsing_chunk at this point
+          tool_parsing_chunk.finish_reason = chunk.finish_reason
+          tool_parsing_chunk.is_finished = chunk.is_finished
+
+          # If we haven't finished parsing the tool call, we need to wait for the next chunk
+          if not tool_parsing_chunk.is_finished:
+            continue
+          else:
+            chunk = tool_parsing_chunk
+
+        decoded = chunk.text
+
         try:
           decoded, tool_calls = api_tool_parser.parse_tool_calls(decoded)
 

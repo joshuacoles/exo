@@ -63,6 +63,9 @@ class ToolParser:
     """
     raise NotImplementedError()
 
+  def start_prefix(self) -> str:
+    return self.tokenizer.decode([self.start_token()])
+
   def tool_grammar(self) -> str:
     """
     Returns an LLGuidance grammar for tool calling. This should include the start token and any end tokens.
@@ -204,7 +207,7 @@ class WattToolParser(ToolParser):
     super().__init__(tokenizer, tools, tool_choice)
 
   def start_token(self):
-    return self.tokenizer.encode("[")[0]
+    return self.tokenizer.encode("[", add_special_tokens=False)[0]
 
   def tool_grammar(self) -> str:
     import os
