@@ -1,5 +1,5 @@
 from exo.inference.shard import Shard
-from exo.models import get_repo
+from exo.models import get_repo, get_model_card
 from pathlib import Path
 from exo.download.hf.hf_helpers import get_hf_endpoint, get_auth_headers, filter_repo_objects, get_allow_patterns
 from exo.download.shard_download import ShardDownloader
@@ -292,7 +292,7 @@ class NewShardDownloader(ShardDownloader):
     return self._on_progress
 
   async def ensure_shard(self, shard: Shard, inference_engine_name: str) -> Path:
-    target_dir, _ = await download_shard(shard, inference_engine_name, self.on_progress, max_parallel_downloads=self.max_parallel_downloads)
+    target_dir, _ = await download_shard(shard, inference_engine_name, self.on_progress, max_parallel_downloads=self.max_parallel_downloads, skip_download=get_model_card(shard.model_id).get("private", False))
     return target_dir
 
   async def get_shard_download_status(self, inference_engine_name: str) -> AsyncIterator[tuple[Path, RepoProgressEvent]]:
