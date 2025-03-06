@@ -215,19 +215,47 @@ def handle_command(command: str, messages: List[Dict[str, Any]], model: str, too
         role = msg["role"].capitalize()
         if "content" in msg and msg["content"]:
           content = msg["content"]
-          role_color = "\033[94m" if role == "User" else "\033[92m"
-          print(f"{role_color}{role}:\033[0m {content}")
+          if role == "User":
+            print(f"\033[94mYou:\033[0m {content}")
+          elif role == "Assistant":
+            print(f"\033[92mAI:\033[0m {content}")
+          elif role == "System":
+            print(f"\033[93mSystem:\033[0m {content}")
+          elif role == "Tool":
+            try:
+              result = json.loads(content)
+              tool_id = msg.get("tool_call_id", "unknown")
+              # Find the corresponding tool call to get the function name
+              tool_call = None
+              for m in messages:
+                if "tool_calls" in m:
+                  for tc in m["tool_calls"]:
+                    if tc["id"] == tool_id:
+                      tool_call = tc
+                      break
+                if tool_call:
+                  break
+              
+              function_name = tool_call["function"]["name"] if tool_call else "unknown"
+              
+              # Format tool results in a more conversational way
+              if function_name == "get_current_time":
+                print(f"\033[96mSystem: The current time is {result['time']}\033[0m")
+              elif function_name == "get_weather":
+                print(f"\033[96mSystem: Weather for {result['location']}: {result['condition']}, {result['temperature']}\033[0m")
+              elif function_name == "calculate":
+                if "error" in result:
+                  print(f"\033[96mSystem: Calculation error: {result['error']}\033[0m")
+                else:
+                  print(f"\033[96mSystem: {result['expression']} = {result['result']}\033[0m")
+              else:
+                print(f"\033[96mSystem: Result from {function_name}: {json.dumps(result, indent=2)}\033[0m")
+            except:
+              print(f"\033[96mSystem: {content}\033[0m")
         elif "tool_calls" in msg:
-          print(f"\033[95m{role} called tools:\033[0m")
           for tool_call in msg["tool_calls"]:
             func_name = tool_call.get("function", {}).get("name", "")
-            args = tool_call.get("function", {}).get("arguments", "")
-            print(f"  - Function: {func_name}")
-            print(f"    Arguments: {args}")
-        elif "tool_call_id" in msg:
-          print(f"\033[96m{role} returned tool result:\033[0m")
-          print(f"  - Tool ID: {msg['tool_call_id']}")
-          print(f"    Result: {msg['content']}")
+            print(f"\033[95mAI is using {func_name}...\033[0m")
     return True, model, tools_enabled, tool_call_format
 
   elif cmd == "/tools":
@@ -284,18 +312,32 @@ def format_ai_prompt():
 def handle_tool_calls(tool_calls: List[Dict], messages: List[Dict]) -> None:
   """Process tool calls and add results to messages."""
   for tool_call in tool_calls:
-    print("TC", tool_call)
     function_name = tool_call["function"]["name"]
     function_args = json.loads(tool_call["function"]["arguments"])
     tool_call_id = tool_call["id"]
 
-    print(f"\n\033[95mCalling function: {function_name}\033[0m")
-    print(f"Arguments: {json.dumps(function_args, indent=2)}")
-
+    # More conversational format for tool calls
+    print(f"\n\033[95mAI is using {function_name}...\033[0m")
+    
     # Execute the function
     if function_name in TOOL_FUNCTIONS:
       result = TOOL_FUNCTIONS[function_name](function_args)
-      print(f"\033[96mResult: {json.dumps(result, indent=2)}\033[0m")
+      
+      # Format the result in a more conversational way
+      if function_name == "get_current_time":
+        print(f"\033[96mSystem: The current time is {result['time']}\033[0m")
+      elif function_name == "get_weather":
+        print(f"\033[96mSystem: Weather for {result['location']}: {result['condition']}, {result['temperature']}\033[0m")
+        if "note" in result:
+          print(f"\033[90m{result['note']}\033[0m")
+      elif function_name == "calculate":
+        if "error" in result:
+          print(f"\033[96mSystem: Calculation error: {result['error']}\033[0m")
+        else:
+          print(f"\033[96mSystem: {result['expression']} = {result['result']}\033[0m")
+      else:
+        # Generic formatting for other tools
+        print(f"\033[96mSystem: Result from {function_name}: {json.dumps(result, indent=2)}\033[0m")
 
       # Add the function result to messages
       messages.append({
@@ -304,14 +346,13 @@ def handle_tool_calls(tool_calls: List[Dict], messages: List[Dict]) -> None:
         "content": json.dumps(result)
       })
     else:
-      error_result = {"error": f"Function {function_name} not found"}
-      print(f"\033[91mError: {json.dumps(error_result, indent=2)}\033[0m")
+      print(f"\033[91mSystem: Function {function_name} not found\033[0m")
 
       # Add the error result to messages
       messages.append({
         "role": "tool",
         "tool_call_id": tool_call_id,
-        "content": json.dumps(error_result)
+        "content": json.dumps({"error": f"Function {function_name} not found"})
       })
 
 

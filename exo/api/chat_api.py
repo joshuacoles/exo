@@ -325,14 +325,14 @@ class ChatApi:
     data = await request.json()
     if DEBUG >= 2: print(f"Handling chat completions request from {request.remote}: {data}")
 
-    with open(f"chat_request_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}.raw.json", "w") as f:
-      json.dump(data, f)
+    # with open(f"chat_request_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}.raw.json", "w") as f:
+    #   json.dump(data, f)
 
     stream = data.get("stream", False)
     chat_request = ChatCompletionRequest.parse_chat_request(data, self.default_model)
 
-    with open(f"chat_request_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}.json", "w") as f:
-      f.write(chat_request.model_dump_json())
+    # with open(f"chat_request_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}.json", "w") as f:
+    #   f.write(chat_request.model_dump_json())
 
     shard = build_base_shard(chat_request.model, self.inference_engine_classname)
     if not shard:
