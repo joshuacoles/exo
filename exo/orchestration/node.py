@@ -6,7 +6,7 @@ import time
 import traceback
 from typing import List, Dict, Optional, Tuple, Union, Set
 
-from exo.inference.tool_calling import ToolFormat
+from exo.inference.tool_calling import ToolParser
 from exo.networking import Discovery, PeerHandle, Server
 from exo.inference.inference_engine import InferenceEngine, Shard
 from exo.topology.topology import Topology
@@ -36,12 +36,12 @@ class BufferedOutput:
   finish_reason: Optional[str] = None
 
   # Grammar for full output structural generation
-  guidance_interpreter: Union[llguidance.LLInterpreter, None] = None
+  guidance_interpreter: Optional[llguidance.LLInterpreter] = None
 
   # Guided generation for tool calls.
-  tool_format: Union[ToolFormat, None] = None
+  tool_parser: Optional[ToolParser] = None
   tool_mode: bool = False
-  tool_guidance_interpreter: Union[llguidance.LLInterpreter, None] = None
+  tool_guidance_interpreter: Optional[llguidance.LLInterpreter] = None
 
   def __init__(
     self,
@@ -49,7 +49,8 @@ class BufferedOutput:
     eos_token_id: int,
     stop_sequences: List[str],
     tokenizer,
-    grammar_definition: Optional[str] = None
+    grammar_definition: Optional[str] = None,
+    tool_parser: Optional[ToolParser] = None,
   ):
     self.buffer = []
     self.buffer_char_size = max(len(stop_sequence) for stop_sequence in stop_sequences) if len(
@@ -59,15 +60,28 @@ class BufferedOutput:
     self.stop_sequences = stop_sequences
     self.tokenizer = tokenizer
 
+    if grammar_definition and tool_parser:
+      raise ValueError("Cannot specify both grammar_definition and tool_parser")
+
     # If we are generating structured responses initialize the guidance
     if grammar_definition:
       print(f"Initializing guidance with grammar definition {grammar_definition}")
       self.initialize_guidance(grammar_definition)
+    elif tool_parser:
+      print(f"BufferedOutput with tool parser {tool_parser}")
+      self.tool_parser = tool_parser
+
+      if tool_parser.is_immediate():
+        # This will have the effect of immediately entering tool mode.
+        # TODO: Is there a better way to handle this?
+        # TODO: Can this be handled by FF_tokens and a whole output grammar? Do we want to merge the two?
+        self.append(tool_parser.start_token())
 
   def initialize_guidance(self, grammar_definition: str):
     self.guidance_interpreter = llguidance.LLInterpreter(
       llguidance.hf.from_tokenizer(self.tokenizer, n_vocab=self.tokenizer.vocab_size),
       grammar_definition,
+      # TODO: Try enable these, I think this will involve linking out state machine into theirs more
       enable_ff_tokens=False,
       enable_backtrack=False,
       log_level=2
@@ -79,14 +93,14 @@ class BufferedOutput:
     self.tool_mode = True
     self.tool_guidance_interpreter = llguidance.LLInterpreter(
       llguidance.hf.from_tokenizer(self.tokenizer, n_vocab=self.tokenizer.vocab_size),
-      self.tool_format.tool_grammar(),
+      self.tool_parser.tool_grammar(),
       enable_ff_tokens=False,
       enable_backtrack=False,
       log_level=2
     )
 
     self.tool_guidance_interpreter.start_without_prompt()
-    self.tool_guidance_interpreter.commit_token(self.tool_format.start_token())
+    self.tool_guidance_interpreter.commit_token(self.tool_parser.start_token())
 
   def append(self, token: int):
     # Guidance interpreter is used for whole output structural generation
@@ -114,7 +128,7 @@ class BufferedOutput:
     elif self._token_count >= self.max_tokens:
       self.is_finished = True
       self.finish_reason = "length"
-    elif self.tool_format and token == self.tool_format.start_token():
+    elif self.tool_parser and token == self.tool_parser.start_token():
       self.enter_tool_mode()
     elif self.guidance_interpreter and self.guidance_interpreter.has_pending_stop():
       # TODO: We should handle the different stop reasons
@@ -193,9 +207,12 @@ class BufferedOutput:
     return []
 
   def get_token_mask(self) -> Optional[np.ndarray]:
-    if not self.guidance_interpreter:
+    if self.tool_mode:
+      mask, _ = self.tool_guidance_interpreter.compute_mask()
+    elif self.guidance_interpreter:
+      mask, _ = self.guidance_interpreter.compute_mask()
+    else:
       return None
-    mask, _ = self.guidance_interpreter.compute_mask()
 
     if mask is None:
       return None
@@ -361,7 +378,8 @@ class Node:
         max_tokens=max_tokens,
         stop_sequences=generation_options.stop or [],
         tokenizer=self.inference_engine.tokenizer,
-        grammar_definition=generation_options.grammar_definition
+        grammar_definition=generation_options.grammar_definition,
+        tool_parser=generation_options.tool_parser(),
       )
 
     buffered_output = self.buffered_token_output[request_id]

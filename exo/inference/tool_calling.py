@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, Any, Union, Literal, List
+from typing import Dict, Any, Union, Literal, List, Optional
 import json
 
 
@@ -43,9 +43,32 @@ ToolChoice = Union[
 ]
 
 
-class ToolFormat:
-  def __init__(self, tools: List[ToolDefinition]):
+class ToolParser:
+  def __init__(self, tools: List[ToolDefinition], tool_choice: Optional[ToolChoice]):
     self.tools = tools
+    if tool_choice is not None:
+      self.tool_choice = tool_choice
+    else:
+      if tools is not None and len(tools) > 0:
+        self.tool_choice = "auto"
+      else:
+        self.tool_choice = "none"
+
+  def is_immediate(self) -> bool:
+    """
+    Returns whether the tool call is immediate.
+    """
+    return self.tool_choice == "required" or isinstance(self.tool_choice, SpecificToolChoice)
+
+  def active_tools(self):
+    if self.tool_choice == "none":
+      return []
+    elif self.tool_choice == "auto" or self.tool_choice == "required":
+      return self.tools
+    elif isinstance(self.tool_choice, SpecificToolChoice):
+      return [tool for tool in self.tools if tool.name == self.tool_choice.function.name]
+    else:
+      raise ValueError(f"Invalid tool_choice: {self.tool_choice}")
 
   def start_token(self) -> int:
     """
@@ -60,9 +83,9 @@ class ToolFormat:
     raise NotImplementedError()
 
 
-class WrappedJsonToolFormat(ToolFormat):
-  def __init__(self, tools: List[ToolDefinition], start_token: str, end_token: str):
-    super().__init__(tools)
+class WrappedJsonToolParser(ToolParser):
+  def __init__(self, tools: List[ToolDefinition], tool_choice: Optional[ToolChoice], start_token: str, end_token: str):
+    super().__init__(tools, tool_choice)
     self.start_token = start_token
     self.end_token = end_token
 
@@ -73,7 +96,7 @@ class WrappedJsonToolFormat(ToolFormat):
   def tool_grammar(self):
     return [
       self.start_token,
-      json_schema_to_grammar(generate_tool_call_json_schema(self.tools)),
+      json_schema_to_grammar(generate_tool_call_json_schema(self.active_tools())),
       self.end_token,
     ]
 
