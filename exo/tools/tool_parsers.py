@@ -229,7 +229,7 @@ class WattToolParser(ToolParser):
     tool_calls = []
 
     # Match patterns like [func_name(param1=value1, param2=value2)]
-    for i, m in enumerate(re.finditer(r'\[([\w_]+)\((.*?)\)\]', content, re.DOTALL)):
+    for i, m in enumerate(re.finditer(r'\[([\w_\-]+)\((.*?)\)\]', content, re.DOTALL)):
       if i == 0:
         offset = m.end()
 
