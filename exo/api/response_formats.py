@@ -3,7 +3,7 @@ import json
 
 from pydantic import BaseModel, TypeAdapter
 from abc import ABC
-from exo.inference.grammars import JSON_LARK_GRAMMAR
+from exo.inference.grammars import JSON_LARK_GRAMMAR, json_object_grammar, json_schema_grammar
 
 
 class ResponseFormatBase(ABC, BaseModel):
@@ -24,9 +24,7 @@ class JsonObjectResponseFormat(ResponseFormatBase):
   type: Literal["json_object"]
 
   def to_grammar(self) -> Optional[str]:
-    return json.dumps({
-      "grammars": [{"lark_grammar": JSON_LARK_GRAMMAR}]
-    })
+    return json_object_grammar()
 
 
 class JsonSchemaResponseFormat(ResponseFormatBase):
@@ -34,9 +32,7 @@ class JsonSchemaResponseFormat(ResponseFormatBase):
   json_schema: Any
 
   def to_grammar(self) -> Optional[str]:
-    return json.dumps({
-      "grammars": [{"json_schema": self.json_schema}]
-    })
+    return json_schema_grammar(self.json_schema)
 
 
 # Aligns with https://github.com/guidance-ai/llgtrt

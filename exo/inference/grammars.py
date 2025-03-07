@@ -1,30 +1,19 @@
 import json
+import os
 
-JSON_LARK_GRAMMAR = """
-%llguidance {}
+json_lark_grammar_path = os.path.join(os.path.dirname(__file__), "grammars/json.lark")
 
-start: object
+with open(json_lark_grammar_path, "r") as f:
+  JSON_LARK_GRAMMAR = f.read()
 
-value: object
-     | array
-     | STRING
-     | NUMBER
-     | ("true" | "false" | "null") WS
 
-object: "{" WS (STRING ":" WS value ("," WS STRING ":" WS value)*)? "}" WS
-array: "[" WS (value ("," WS value)*)? "]" WS
+def json_object_grammar() -> str:
+  return lark_grammar(JSON_LARK_GRAMMAR)
 
-// escapes
-STRING: "\"" ((/[^"\\\x7F\x00-\x1F]/ | "\\" (/["\\bfnrt]/ | "u" /[0-9a-fA-F]/{4,4})))* "\"" WS
 
-NUMBER: "-"? (/[0-9]/ | /[1-9]/ /[0-9]/{0,15}) ("." /[0-9]/+)? (/[eE]/ /[-+]/? /[0-9]/ /[1-9]/{0,15})? WS
-
-// Optional space: by convention, applied in this grammar after literal chars when allowed
-WS: ""
-     | " "
-     | "\n" /[ \t]/{0,20}
-"""
+def json_schema_grammar(json_schema: dict) -> str:
+  return json.dumps({"grammars": [{"json_schema": json_schema}]})
 
 
 def lark_grammar(grammar: str) -> str:
-    return json.dumps({"grammars": [{"lark_grammar": grammar}]})
+  return json.dumps({"grammars": [{"lark_grammar": grammar}]})
