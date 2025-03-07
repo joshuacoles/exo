@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from pathlib import Path
 
 from exo.inference.shard import Shard
 from typing import Optional, List, Literal
@@ -597,3 +598,18 @@ def get_supported_models(supported_inference_engine_lists: Optional[List[List[st
     model_id for model_id, model_info in model_cards.items()
     if supports_all_engine_lists(model_info)
   ]
+
+
+def load_additional_models(additional_models_path: Path):
+  import json
+
+  try:
+    with open(additional_models_path, 'r') as f:
+      additional_models = json.load(f)
+
+    for model_id, model_info in additional_models.items():
+      model_cards[model_id] = ModelCard.model_validate(model_info)
+
+    print(f"Loaded {len(additional_models)} additional models from {additional_models_path}")
+  except Exception as e:
+    print(f"Error loading additional models from {additional_models_path}: {e}")
