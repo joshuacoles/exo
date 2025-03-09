@@ -1,4 +1,4 @@
-from typing import Literal, Union
+from typing import List, Literal, Union
 from pydantic import BaseModel, TypeAdapter
 
 
@@ -20,3 +20,19 @@ ToolChoice = Union[
 ]
 
 ToolChoiceModel = TypeAdapter(ToolChoice)
+
+class Tool(BaseModel):
+    name: str
+    ...
+
+def choose_tools(tool_choice: ToolChoice, tools: List[Tool]) -> List[Tool]:
+    if tool_choice == "none":
+        return []
+    elif tool_choice == "auto":
+        return tools
+    elif tool_choice == "required":
+        return tools
+    elif isinstance(tool_choice, SpecificToolChoice):
+        return [tool for tool in tools if tool.name == tool_choice.function.name]
+    else:
+        raise ValueError(f"Invalid tool choice: {tool_choice}")
