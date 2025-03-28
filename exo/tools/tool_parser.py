@@ -33,7 +33,9 @@ def get_tool_parser_by_name(name: str) -> ToolParser:
     return LlamaPythonTag()
   elif name == "watt":
     from exo.tools.watt_tool_parser import WattToolParser
-
     return WattToolParser()
+  elif name == "llama_3_3":
+    from exo.tools.llama_3_3_custom_tools import Llama33ToolParser
+    return Llama33ToolParser()
   else:
     raise ValueError(f"Unknown tool parser name: {name}")
