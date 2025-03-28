@@ -6,6 +6,7 @@ from exo.api.chat_completion_request import ToolDefinition
 from exo.download.new_shard_download import exo_home
 from exo.tools.watt_tool_parser import WattToolParser
 from exo.tools.llama_python_tag_tool_parser import LlamaPythonTag
+from exo.tools.llama_3_3_custom_tools import Llama33ToolParser
 from exo.inference.buffered_output import BufferedOutput
 
 
@@ -24,6 +25,11 @@ def watt_parser():
 @pytest.fixture
 def llama_parser():
   return LlamaPythonTag()
+
+
+@pytest.fixture
+def llama33_parser():
+  return Llama33ToolParser()
 
 
 def validate_with_guidance(parser, tools, text, tokenizer, required=True):
@@ -235,7 +241,7 @@ def test_watt_parallel_tool_calling_parse_complete(watt_parser, tokenizer):
 
 
 # Enhanced error handling tests
-def test_error_handling(watt_parser, llama_parser):
+def test_error_handling(watt_parser, llama_parser, llama33_parser):
   # Test malformed Watt patterns
   assert len(watt_parser.parse_complete("[unclosed_tool(", True)) == 0
   # TODO: This passes
@@ -244,3 +250,121 @@ def test_error_handling(watt_parser, llama_parser):
   # Test malformed Llama patterns
   assert len(llama_parser.parse_complete("<|python_tag|>unclosed", True)) == 0
   assert len(llama_parser.parse_complete("<|python_tag|>{invalid_json}<|eom_id|>", True)) == 0
+
+
+# Enhanced error handling tests
+def test_llama33_error_handling(watt_parser, llama_parser, llama33_parser):
+  # Test malformed Llama 3.3 patterns
+  assert len(llama33_parser.parse_complete("{unclosed_json", False)) == 0
+  assert len(llama33_parser.parse_complete("{invalid_json}", False)) == 0
+  assert len(llama33_parser.parse_complete("{\"name\": \"tool\"}", False)) == 0  # Missing parameters field
+
+
+def test_llama33_grammar_validation(llama33_parser, tokenizer):
+  tools = [
+    ToolDefinition(
+      type="function",
+      function=ToolDefinition.FunctionDefinition(
+        name="dummy",
+        parameters={"type": "object", "properties": {}}
+      )
+    ),
+    ToolDefinition(
+      type="function",
+      function=ToolDefinition.FunctionDefinition(
+        name="with_arg",
+        parameters={"type": "object", "properties": {"name": {"type": "string"}}}
+      )
+    ),
+    ToolDefinition(
+      type="function",
+      function=ToolDefinition.FunctionDefinition(
+        name="with_arg_limited",
+        parameters={"type": "object", "properties": {"name": {"type": "string"}}, "additionalProperties": False}
+      )
+    )
+  ]
+
+  # Valid tool calls
+  assert validate_with_guidance(llama33_parser, tools,
+                              json.dumps({"name": "dummy", "parameters": {}}),
+                              tokenizer) == "finished"
+
+  assert validate_with_guidance(llama33_parser, tools,
+                              json.dumps({"name": "with_arg", "parameters": {"name": "value"}}),
+                              tokenizer) == "finished"
+
+  # Invalid tool calls
+  assert validate_with_guidance(llama33_parser, tools, "{}", tokenizer) == "failed"
+  assert validate_with_guidance(llama33_parser, tools, json.dumps({"name": "dummy"}), tokenizer) == "failed"
+
+  # Additional arg in non-limited tool
+  assert validate_with_guidance(llama33_parser, tools,
+                              json.dumps({"name": "dummy", "parameters": {"allowed_but_not_in_schema": 1}}),
+                              tokenizer) == "finished"
+
+  # Additional arg in limited tool
+  assert validate_with_guidance(llama33_parser, tools,
+                              json.dumps({"name": "with_arg_limited", "parameters": {"disallowed": 1}}),
+                              tokenizer) == "failed"
+
+  # Wrong type
+  assert validate_with_guidance(llama33_parser, tools,
+                              json.dumps({"name": "with_arg", "parameters": {"name": 2}}),
+                              tokenizer) == "failed"
+
+  # Not listed tool
+  assert validate_with_guidance(llama33_parser, tools,
+                              json.dumps({"name": "wrong_name", "parameters": {"name": "value"}}),
+                              tokenizer) == "failed"
+
+  # Required tool call
+  assert validate_with_guidance(llama33_parser, tools, "Not a tool call", tokenizer) == "failed"
+
+  # Text generation
+  assert validate_with_guidance(llama33_parser, tools, "Not a tool call", tokenizer, required=False) == "accepting"
+
+
+def test_llama33_parse_complete(llama33_parser):
+  # Basic tool call
+  simple_tool_call = json.dumps({"name": "simple_tool", "parameters": {}})
+  parsed = llama33_parser.parse_complete(simple_tool_call, False)
+  assert len(parsed) == 1
+  assert parsed[0].name == "simple_tool"
+  assert parsed[0].arguments == "{}"
+
+  # Tool call with parameters
+  tool_with_params = json.dumps({"name": "param_tool", "parameters": {"key": "value", "number": 42}})
+  parsed = llama33_parser.parse_complete(tool_with_params, False)
+  assert len(parsed) == 1
+  assert parsed[0].name == "param_tool"
+  assert json.loads(parsed[0].arguments) == {"key": "value", "number": 42}
+
+  # Tool call embedded in text
+  text_with_tool = "Here's a tool call: " + json.dumps({"name": "embedded_tool", "parameters": {"embedded": True}}) + " in text."
+  parsed = llama33_parser.parse_complete(text_with_tool, False)
+  assert len(parsed) == 1
+  assert parsed[0].name == "embedded_tool"
+  assert json.loads(parsed[0].arguments) == {"embedded": True}
+
+  # Multiple tool calls in text
+  multi_tools = (
+    "First tool: " + json.dumps({"name": "first_tool", "parameters": {"order": 1}}) +
+    " Second tool: " + json.dumps({"name": "second_tool", "parameters": {"order": 2}})
+  )
+  parsed = llama33_parser.parse_complete(multi_tools, False)
+  assert len(parsed) == 2
+  assert parsed[0].name == "first_tool"
+  assert parsed[1].name == "second_tool"
+  assert json.loads(parsed[0].arguments) == {"order": 1}
+  assert json.loads(parsed[1].arguments) == {"order": 2}
+
+  # Invalid JSON
+  invalid_json = "{not valid json}"
+  parsed = llama33_parser.parse_complete(invalid_json, False)
+  assert len(parsed) == 0
+
+  # Missing required fields
+  missing_fields = json.dumps({"name": "no_params"})
+  parsed = llama33_parser.parse_complete(missing_fields, False)
+  assert len(parsed) == 0
